@@ -951,6 +951,59 @@ json
   "AllowedHosts": "*"
 }
 
+
+
+// Configuration/MappingProfile.cs
+using AutoMapper;
+using SSOManagement.API.Models.Entities;
+using SSOManagement.API.Models.DTOs;
+
+namespace SSOManagement.API.Configuration
+{
+    public class MappingProfile : Profile
+    {
+        public MappingProfile()
+        {
+            // SSOProvider mappings
+            CreateMap<SSOProvider, SSOProviderResponseDto>()
+                .ForMember(dest => dest.Id, opt => opt.MapFrom(src => src.Id))
+                .ForMember(dest => dest.ProviderName, opt => opt.MapFrom(src => src.ProviderName))
+                .ForMember(dest => dest.ProviderType, opt => opt.MapFrom(src => src.ProviderType))
+                .ForMember(dest => dest.ClientId, opt => opt.MapFrom(src => src.ClientId))
+                .ForMember(dest => dest.Authority, opt => opt.MapFrom(src => src.Authority))
+                .ForMember(dest => dest.GrantType, opt => opt.MapFrom(src => src.GrantType))
+                .ForMember(dest => dest.Scope, opt => opt.MapFrom(src => src.Scope))
+                .ForMember(dest => dest.RedirectUri, opt => opt.MapFrom(src => src.RedirectUri))
+                .ForMember(dest => dest.IsActive, opt => opt.MapFrom(src => src.IsActive))
+                .ForMember(dest => dest.CreatedAt, opt => opt.MapFrom(src => src.CreatedAt))
+                .ForMember(dest => dest.UpdatedAt, opt => opt.MapFrom(src => src.UpdatedAt));
+                // Note: ClientSecret is intentionally NOT mapped to response DTO
+
+            CreateMap<SSOProviderDto, SSOProvider>()
+                .ForMember(dest => dest.Id, opt => opt.Ignore())
+                .ForMember(dest => dest.CreatedAt, opt => opt.Ignore())
+                .ForMember(dest => dest.UpdatedAt, opt => opt.Ignore())
+                .ForMember(dest => dest.Settings, opt => opt.Ignore())
+                .ForMember(dest => dest.UserMappings, opt => opt.Ignore());
+
+            // SSOProviderSetting mappings
+            CreateMap<SSOProviderSetting, Dictionary<string, string>>()
+                .ConvertUsing((src, dest, context) =>
+                {
+                    dest = dest ?? new Dictionary<string, string>();
+                    dest[src.SettingKey] = src.SettingValue;
+                    return dest;
+                });
+
+            // UserSSOMapping mappings (if needed)
+            CreateMap<UserSSOMapping, UserSSOMapping>();
+        }
+    }
+}
+
+
+
+
 Key Features
 Security Best Practices​
 
