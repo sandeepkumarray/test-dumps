@@ -1028,3 +1028,556 @@ Multi-Tenant Support​
 The architecture supports multiple organizations/tenants, each with their own SSO configurations, making it suitable for SaaS applications.
 
 This solution provides a production-ready foundation for managing multiple SSO providers with secure credential storage, flexible configuration, and a clean API interface for your UI application.
+
+
+
+
+Solution: Dynamic Authentication Scheme Registration
+1. Create Dynamic Authentication Options Provider
+
+csharp
+// Services/IDynamicAuthenticationSchemeProvider.cs
+namespace SSOManagement.API.Services
+{
+    public interface IDynamicAuthenticationSchemeProvider
+    {
+        Task LoadProvidersAsync();
+        Task AddOrUpdateProviderAsync(string schemeName);
+        Task RemoveProviderAsync(string schemeName);
+    }
+}
+
+// Services/DynamicAuthenticationSchemeProvider.cs
+using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.Authentication.OAuth;
+using Microsoft.AspNetCore.Authentication.OpenIdConnect;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
+using SSOManagement.API.Data;
+
+namespace SSOManagement.API.Services
+{
+    public class DynamicAuthenticationSchemeProvider : IDynamicAuthenticationSchemeProvider
+    {
+        private readonly IAuthenticationSchemeProvider _schemeProvider;
+        private readonly IOptionsMonitorCache<OAuthOptions> _oauthOptionsCache;
+        private readonly IOptionsMonitorCache<OpenIdConnectOptions> _oidcOptionsCache;
+        private readonly ApplicationDbContext _context;
+        private readonly IEncryptionService _encryptionService;
+        private readonly ILogger<DynamicAuthenticationSchemeProvider> _logger;
+
+        public DynamicAuthenticationSchemeProvider(
+            IAuthenticationSchemeProvider schemeProvider,
+            IOptionsMonitorCache<OAuthOptions> oauthOptionsCache,
+            IOptionsMonitorCache<OpenIdConnectOptions> oidcOptionsCache,
+            ApplicationDbContext context,
+            IEncryptionService encryptionService,
+            ILogger<DynamicAuthenticationSchemeProvider> logger)
+        {
+            _schemeProvider = schemeProvider;
+            _oauthOptionsCache = oauthOptionsCache;
+            _oidcOptionsCache = oidcOptionsCache;
+            _context = context;
+            _encryptionService = encryptionService;
+            _logger = logger;
+        }
+
+        public async Task LoadProvidersAsync()
+        {
+            var providers = await _context.SSOProviders
+                .Where(p => p.IsActive)
+                .ToListAsync();
+
+            foreach (var provider in providers)
+            {
+                try
+                {
+                    await RegisterSchemeAsync(provider);
+                    _logger.LogInformation("Loaded SSO provider: {ProviderName}", provider.ProviderName);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Failed to load SSO provider: {ProviderName}", provider.ProviderName);
+                }
+            }
+        }
+
+        public async Task AddOrUpdateProviderAsync(string schemeName)
+        {
+            var provider = await _context.SSOProviders
+                .FirstOrDefaultAsync(p => p.ProviderName == schemeName && p.IsActive);
+
+            if (provider == null)
+            {
+                await RemoveProviderAsync(schemeName);
+                return;
+            }
+
+            // Remove existing scheme if it exists
+            var existingScheme = await _schemeProvider.GetSchemeAsync(schemeName);
+            if (existingScheme != null)
+            {
+                await RemoveProviderAsync(schemeName);
+            }
+
+            await RegisterSchemeAsync(provider);
+        }
+
+        public async Task RemoveProviderAsync(string schemeName)
+        {
+            var scheme = await _schemeProvider.GetSchemeAsync(schemeName);
+            if (scheme != null)
+            {
+                if (_schemeProvider is IAuthenticationSchemeProvider dynamicProvider)
+                {
+                    _schemeProvider.RemoveScheme(schemeName);
+                }
+
+                // Clear options cache
+                _oauthOptionsCache.TryRemove(schemeName);
+                _oidcOptionsCache.TryRemove(schemeName);
+            }
+        }
+
+        private async Task RegisterSchemeAsync(Models.Entities.SSOProvider provider)
+        {
+            var decryptedSecret = _encryptionService.Decrypt(provider.ClientSecret);
+
+            switch (provider.ProviderType.ToLowerInvariant())
+            {
+                case "oauth2":
+                    RegisterOAuth2Scheme(provider, decryptedSecret);
+                    break;
+
+                case "openidconnect":
+                case "oidc":
+                    RegisterOpenIdConnectScheme(provider, decryptedSecret);
+                    break;
+
+                default:
+                    throw new NotSupportedException($"Provider type '{provider.ProviderType}' is not supported");
+            }
+
+            await Task.CompletedTask;
+        }
+
+        private void RegisterOAuth2Scheme(Models.Entities.SSOProvider provider, string clientSecret)
+        {
+            var options = new OAuthOptions
+            {
+                ClientId = provider.ClientId,
+                ClientSecret = clientSecret,
+                CallbackPath = new PathString("/api/authentication/callback"),
+                AuthorizationEndpoint = $"{provider.Authority}/authorize",
+                TokenEndpoint = $"{provider.Authority}/token",
+                UserInformationEndpoint = $"{provider.Authority}/userinfo",
+                SaveTokens = true
+            };
+
+            // Add scopes
+            if (!string.IsNullOrEmpty(provider.Scope))
+            {
+                foreach (var scope in provider.Scope.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+                {
+                    options.Scope.Add(scope);
+                }
+            }
+
+            // Register the scheme dynamically
+            _schemeProvider.AddScheme(new AuthenticationScheme(
+                provider.ProviderName,
+                provider.ProviderName,
+                typeof(OAuthHandler<OAuthOptions>)
+            ));
+
+            // Cache the options
+            _oauthOptionsCache.TryAdd(provider.ProviderName, options);
+        }
+
+        private void RegisterOpenIdConnectScheme(Models.Entities.SSOProvider provider, string clientSecret)
+        {
+            var options = new OpenIdConnectOptions
+            {
+                ClientId = provider.ClientId,
+                ClientSecret = clientSecret,
+                Authority = provider.Authority,
+                CallbackPath = new PathString("/api/authentication/callback"),
+                ResponseType = "code",
+                SaveTokens = true,
+                GetClaimsFromUserInfoEndpoint = true
+            };
+
+            // Add scopes
+            if (!string.IsNullOrEmpty(provider.Scope))
+            {
+                options.Scope.Clear();
+                foreach (var scope in provider.Scope.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+                {
+                    options.Scope.Add(scope);
+                }
+            }
+
+            // Use metadata URL if available
+            if (!string.IsNullOrEmpty(provider.MetadataUrl))
+            {
+                options.MetadataAddress = provider.MetadataUrl;
+            }
+
+            // Register the scheme dynamically
+            _schemeProvider.AddScheme(new AuthenticationScheme(
+                provider.ProviderName,
+                provider.ProviderName,
+                typeof(OpenIdConnectHandler)
+            ));
+
+            // Cache the options
+            _oidcOptionsCache.TryAdd(provider.ProviderName, options);
+        }
+    }
+}
+
+2. Update Program.cs
+
+Register the dynamic authentication provider:
+
+csharp
+using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.Authentication.Cookies;
+using Microsoft.AspNetCore.Authentication.OAuth;
+using Microsoft.AspNetCore.Authentication.OpenIdConnect;
+using Microsoft.EntityFrameworkCore;
+using SSOManagement.API.Data;
+using SSOManagement.API.Services;
+using SSOManagement.API.Configuration;
+
+var builder = WebApplication.CreateBuilder(args);
+
+// PostgreSQL Configuration
+builder.Services.AddDbContext<ApplicationDbContext>(options =>
+    options.UseNpgsql(builder.Configuration.GetConnectionString("DefaultConnection")));
+
+// Services
+builder.Services.AddScoped<ISSOProviderService, SSOProviderService>();
+builder.Services.AddSingleton<IEncryptionService, EncryptionService>();
+builder.Services.AddScoped<IDynamicAuthenticationSchemeProvider, DynamicAuthenticationSchemeProvider>();
+
+// AutoMapper
+builder.Services.AddAutoMapper(typeof(Program).Assembly);
+
+// Authentication - Base configuration
+builder.Services.AddAuthentication(options =>
+{
+    options.DefaultScheme = CookieAuthenticationDefaults.AuthenticationScheme;
+    options.DefaultChallengeScheme = CookieAuthenticationDefaults.AuthenticationScheme;
+})
+.AddCookie(options =>
+{
+    options.LoginPath = "/api/authentication/login";
+    options.LogoutPath = "/api/authentication/logout";
+    options.ExpireTimeSpan = TimeSpan.FromHours(8);
+    options.SlidingExpiration = true;
+});
+
+// CORS
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("AllowUI", policy =>
+    {
+        policy.WithOrigins(builder.Configuration.GetSection("AllowedOrigins").Get<string[]>() ?? new[] { "http://localhost:3000" })
+            .AllowAnyHeader()
+            .AllowAnyMethod()
+            .AllowCredentials();
+    });
+});
+
+builder.Services.AddControllers();
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen();
+
+var app = builder.Build();
+
+// Load dynamic authentication providers at startup
+using (var scope = app.Services.CreateScope())
+{
+    var dynamicAuthProvider = scope.ServiceProvider.GetRequiredService<IDynamicAuthenticationSchemeProvider>();
+    await dynamicAuthProvider.LoadProvidersAsync();
+}
+
+if (app.Environment.IsDevelopment())
+{
+    app.UseSwagger();
+    app.UseSwaggerUI();
+}
+
+app.UseHttpsRedirection();
+app.UseCors("AllowUI");
+app.UseAuthentication();
+app.UseAuthorization();
+app.MapControllers();
+
+app.Run();
+
+3. Update SSOProviderService to Reload Schemes
+
+Modify the service to reload authentication schemes when providers are added/updated:​
+
+csharp
+// Services/SSOProviderService.cs (Updated methods)
+public class SSOProviderService : ISSOProviderService
+{
+    private readonly ApplicationDbContext _context;
+    private readonly IEncryptionService _encryptionService;
+    private readonly ILogger<SSOProviderService> _logger;
+    private readonly IDynamicAuthenticationSchemeProvider _dynamicAuthProvider;
+
+    public SSOProviderService(
+        ApplicationDbContext context,
+        IEncryptionService encryptionService,
+        ILogger<SSOProviderService> logger,
+        IDynamicAuthenticationSchemeProvider dynamicAuthProvider)
+    {
+        _context = context;
+        _encryptionService = encryptionService;
+        _logger = logger;
+        _dynamicAuthProvider = dynamicAuthProvider;
+    }
+
+    public async Task<SSOProviderResponseDto> CreateProviderAsync(SSOProviderDto dto)
+    {
+        var existingProvider = await _context.SSOProviders
+            .FirstOrDefaultAsync(p => p.ProviderName == dto.ProviderName);
+
+        if (existingProvider != null)
+            throw new InvalidOperationException($"Provider '{dto.ProviderName}' already exists");
+
+        var provider = new SSOProvider
+        {
+            ProviderName = dto.ProviderName,
+            ProviderType = dto.ProviderType,
+            ClientId = dto.ClientId,
+            ClientSecret = _encryptionService.Encrypt(dto.ClientSecret),
+            Authority = dto.Authority,
+            GrantType = dto.GrantType,
+            Scope = dto.Scope,
+            RedirectUri = dto.RedirectUri,
+            MetadataUrl = dto.MetadataUrl,
+            IsActive = dto.IsActive,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow
+        };
+
+        _context.SSOProviders.Add(provider);
+        await _context.SaveChangesAsync();
+
+        // Dynamically register the authentication scheme
+        if (provider.IsActive)
+        {
+            await _dynamicAuthProvider.AddOrUpdateProviderAsync(provider.ProviderName);
+        }
+
+        _logger.LogInformation("Created SSO provider: {ProviderName}", provider.ProviderName);
+
+        return MapToResponseDto(provider);
+    }
+
+    public async Task<SSOProviderResponseDto> UpdateProviderAsync(Guid id, SSOProviderDto dto)
+    {
+        var provider = await _context.SSOProviders.FindAsync(id);
+
+        if (provider == null)
+            throw new KeyNotFoundException($"Provider with ID {id} not found");
+
+        provider.ProviderName = dto.ProviderName;
+        provider.ProviderType = dto.ProviderType;
+        provider.ClientId = dto.ClientId;
+        
+        if (!string.IsNullOrEmpty(dto.ClientSecret))
+            provider.ClientSecret = _encryptionService.Encrypt(dto.ClientSecret);
+
+        provider.Authority = dto.Authority;
+        provider.GrantType = dto.GrantType;
+        provider.Scope = dto.Scope;
+        provider.RedirectUri = dto.RedirectUri;
+        provider.MetadataUrl = dto.MetadataUrl;
+        provider.IsActive = dto.IsActive;
+        provider.UpdatedAt = DateTime.UtcNow;
+
+        await _context.SaveChangesAsync();
+
+        // Reload the authentication scheme
+        await _dynamicAuthProvider.AddOrUpdateProviderAsync(provider.ProviderName);
+
+        _logger.LogInformation("Updated SSO provider: {ProviderName}", provider.ProviderName);
+
+        return MapToResponseDto(provider);
+    }
+
+    public async Task<bool> DeleteProviderAsync(Guid id)
+    {
+        var provider = await _context.SSOProviders.FindAsync(id);
+        if (provider == null)
+            return false;
+
+        var providerName = provider.ProviderName;
+        _context.SSOProviders.Remove(provider);
+        await _context.SaveChangesAsync();
+
+        // Remove the authentication scheme
+        await _dynamicAuthProvider.RemoveProviderAsync(providerName);
+
+        _logger.LogInformation("Deleted SSO provider: {ProviderName}", providerName);
+        return true;
+    }
+
+    public async Task<bool> ToggleProviderStatusAsync(Guid id)
+    {
+        var provider = await _context.SSOProviders.FindAsync(id);
+        if (provider == null)
+            return false;
+
+        provider.IsActive = !provider.IsActive;
+        provider.UpdatedAt = DateTime.UtcNow;
+        await _context.SaveChangesAsync();
+
+        // Reload or remove the authentication scheme
+        await _dynamicAuthProvider.AddOrUpdateProviderAsync(provider.ProviderName);
+
+        return true;
+    }
+
+    private SSOProviderResponseDto MapToResponseDto(SSOProvider provider)
+    {
+        return new SSOProviderResponseDto
+        {
+            Id = provider.Id,
+            ProviderName = provider.ProviderName,
+            ProviderType = provider.ProviderType,
+            ClientId = provider.ClientId,
+            Authority = provider.Authority,
+            GrantType = provider.GrantType,
+            Scope = provider.Scope,
+            RedirectUri = provider.RedirectUri,
+            IsActive = provider.IsActive,
+            CreatedAt = provider.CreatedAt,
+            UpdatedAt = provider.UpdatedAt
+        };
+    }
+
+    // Implement other methods...
+}
+
+4. Alternative: Simpler Approach with PostConfigure
+
+If the above is too complex, use a simpler approach with PostConfigure:​
+
+csharp
+// Configuration/DynamicAuthenticationPostConfigureOptions.cs
+using Microsoft.AspNetCore.Authentication.OAuth;
+using Microsoft.AspNetCore.Authentication.OpenIdConnect;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
+using SSOManagement.API.Data;
+using SSOManagement.API.Services;
+
+namespace SSOManagement.API.Configuration
+{
+    public class DynamicOAuthPostConfigureOptions : IPostConfigureOptions<OAuthOptions>
+    {
+        private readonly IServiceProvider _serviceProvider;
+
+        public DynamicOAuthPostConfigureOptions(IServiceProvider serviceProvider)
+        {
+            _serviceProvider = serviceProvider;
+        }
+
+        public void PostConfigure(string name, OAuthOptions options)
+        {
+            using var scope = _serviceProvider.CreateScope();
+            var context = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var encryption = scope.ServiceProvider.GetRequiredService<IEncryptionService>();
+
+            var provider = context.SSOProviders
+                .FirstOrDefault(p => p.ProviderName == name && p.IsActive);
+
+            if (provider != null && provider.ProviderType.ToLowerInvariant() == "oauth2")
+            {
+                options.ClientId = provider.ClientId;
+                options.ClientSecret = encryption.Decrypt(provider.ClientSecret);
+                options.AuthorizationEndpoint = $"{provider.Authority}/authorize";
+                options.TokenEndpoint = $"{provider.Authority}/token";
+                options.UserInformationEndpoint = $"{provider.Authority}/userinfo";
+
+                if (!string.IsNullOrEmpty(provider.Scope))
+                {
+                    options.Scope.Clear();
+                    foreach (var scope in provider.Scope.Split(' '))
+                    {
+                        options.Scope.Add(scope);
+                    }
+                }
+            }
+        }
+    }
+
+    public class DynamicOpenIdConnectPostConfigureOptions : IPostConfigureOptions<OpenIdConnectOptions>
+    {
+        private readonly IServiceProvider _serviceProvider;
+
+        public DynamicOpenIdConnectPostConfigureOptions(IServiceProvider serviceProvider)
+        {
+            _serviceProvider = serviceProvider;
+        }
+
+        public void PostConfigure(string name, OpenIdConnectOptions options)
+        {
+            using var scope = _serviceProvider.CreateScope();
+            var context = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var encryption = scope.ServiceProvider.GetRequiredService<IEncryptionService>();
+
+            var provider = context.SSOProviders
+                .FirstOrDefault(p => p.ProviderName == name && p.IsActive);
+
+            if (provider != null && 
+                (provider.ProviderType.ToLowerInvariant() == "openidconnect" || 
+                 provider.ProviderType.ToLowerInvariant() == "oidc"))
+            {
+                options.ClientId = provider.ClientId;
+                options.ClientSecret = encryption.Decrypt(provider.ClientSecret);
+                options.Authority = provider.Authority;
+                
+                if (!string.IsNullOrEmpty(provider.MetadataUrl))
+                {
+                    options.MetadataAddress = provider.MetadataUrl;
+                }
+
+                if (!string.IsNullOrEmpty(provider.Scope))
+                {
+                    options.Scope.Clear();
+                    foreach (var scope in provider.Scope.Split(' '))
+                    {
+                        options.Scope.Add(scope);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Update Program.cs
+builder.Services.AddSingleton<IPostConfigureOptions<OAuthOptions>, DynamicOAuthPostConfigureOptions>();
+builder.Services.AddSingleton<IPostConfigureOptions<OpenIdConnectOptions>, DynamicOpenIdConnectPostConfigureOptions>();
+
+Testing
+
+After implementing, test with:
+
+bash
+# 1. Create a provider
+curl -X POST https://localhost:5001/api/ssoproviders \
+  -H "Content-Type: application/json" \
+  -d '{"providerName":"AzureAD","providerType":"OpenIdConnect",...}'
+
+# 2. Test login
+curl https://localhost:5001/api/authentication/login/AzureAD
+
+The first approach (DynamicAuthenticationSchemeProvider) gives you full control over scheme registration, while the second approach (PostConfigure) is simpler but has some limitations. Choose based on your complexity needs.
