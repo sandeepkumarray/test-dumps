@@ -1,0 +1,1278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>SSO Management - API Tester</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --primary:   #4f46e5;
+      --primary-h: #4338ca;
+      --success:   #16a34a;
+      --danger:    #dc2626;
+      --warning:   #d97706;
+      --bg:        #f1f5f9;
+      --card:      #ffffff;
+      --border:    #e2e8f0;
+      --text:      #1e293b;
+      --muted:     #64748b;
+      --code-bg:   #0f172a;
+      --radius:    10px;
+    }
+
+    body {
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+
+    /* ── Header ── */
+    header {
+      background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%);
+      color: #fff;
+      padding: 1.5rem 2rem;
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      flex-wrap: wrap;
+    }
+    header .logo { font-size: 1.6rem; font-weight: 700; }
+    header .sub  { font-size: .85rem; opacity: .85; }
+    header .badge {
+      margin-left: auto;
+      background: rgba(255,255,255,.2);
+      border-radius: 20px;
+      padding: .25rem .75rem;
+      font-size: .75rem;
+    }
+
+    /* ── Layout ── */
+    .layout {
+      display: grid;
+      grid-template-columns: 220px 1fr;
+      gap: 0;
+      min-height: calc(100vh - 72px);
+    }
+
+    /* ── Sidebar ── */
+    nav {
+      background: var(--card);
+      border-right: 1px solid var(--border);
+      padding: 1.5rem 0;
+      position: sticky;
+      top: 0;
+      height: calc(100vh - 72px);
+      overflow-y: auto;
+    }
+    nav .nav-section {
+      font-size: .7rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .1em;
+      color: var(--muted);
+      padding: .75rem 1.25rem .25rem;
+    }
+    nav a {
+      display: flex;
+      align-items: center;
+      gap: .5rem;
+      padding: .55rem 1.25rem;
+      text-decoration: none;
+      color: var(--text);
+      font-size: .875rem;
+      border-left: 3px solid transparent;
+      transition: all .15s;
+    }
+    nav a:hover, nav a.active {
+      background: #ede9fe;
+      color: var(--primary);
+      border-left-color: var(--primary);
+    }
+
+    /* ── Main ── */
+    main {
+      padding: 2rem;
+      overflow-y: auto;
+    }
+
+    .section { display: none; }
+    .section.active { display: block; }
+
+    /* ── Config bar ── */
+    .config-bar {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1rem 1.25rem;
+      margin-bottom: 1.5rem;
+      display: flex;
+      gap: .75rem;
+      flex-wrap: wrap;
+      align-items: flex-end;
+    }
+    .config-bar .field { flex: 1; min-width: 200px; }
+    .config-bar label { font-size: .75rem; font-weight: 600; color: var(--muted); display: block; margin-bottom: .3rem; }
+
+    /* ── Cards ── */
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      margin-bottom: 1.5rem;
+      overflow: hidden;
+    }
+    .card-header {
+      padding: 1rem 1.25rem;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: .5rem;
+      background: #fafafa;
+    }
+    .card-header h2 { font-size: 1rem; font-weight: 600; }
+    .card-header .method {
+      font-size: .7rem;
+      font-weight: 700;
+      padding: .2rem .5rem;
+      border-radius: 4px;
+      text-transform: uppercase;
+    }
+    .GET    { background: #dcfce7; color: #15803d; }
+    .POST   { background: #dbeafe; color: #1d4ed8; }
+    .PUT    { background: #fef9c3; color: #a16207; }
+    .DELETE { background: #fee2e2; color: #b91c1c; }
+    .PATCH  { background: #ede9fe; color: #7c3aed; }
+    .card-body { padding: 1.25rem; }
+
+    /* ── Forms ── */
+    .form-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+      gap: .75rem;
+    }
+    .form-group { display: flex; flex-direction: column; gap: .3rem; }
+    .form-group.full { grid-column: 1 / -1; }
+    label { font-size: .8rem; font-weight: 600; color: var(--muted); }
+    input, select, textarea {
+      padding: .55rem .75rem;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      font-size: .875rem;
+      background: #fff;
+      color: var(--text);
+      transition: border .15s;
+      width: 100%;
+    }
+    input:focus, select:focus, textarea:focus {
+      outline: none;
+      border-color: var(--primary);
+      box-shadow: 0 0 0 3px rgba(79,70,229,.12);
+    }
+    textarea { resize: vertical; min-height: 80px; font-family: monospace; font-size: .8rem; }
+
+    /* ── Buttons ── */
+    .btn {
+      padding: .55rem 1.1rem;
+      border: none;
+      border-radius: 6px;
+      font-size: .875rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all .15s;
+      display: inline-flex;
+      align-items: center;
+      gap: .4rem;
+    }
+    .btn:disabled { opacity: .6; cursor: not-allowed; }
+    .btn-primary  { background: var(--primary);  color: #fff; }
+    .btn-primary:hover:not(:disabled) { background: var(--primary-h); }
+    .btn-success  { background: var(--success);  color: #fff; }
+    .btn-danger   { background: var(--danger);   color: #fff; }
+    .btn-warning  { background: var(--warning);  color: #fff; }
+    .btn-outline  { background: transparent; color: var(--primary); border: 1.5px solid var(--primary); }
+    .btn-outline:hover { background: #ede9fe; }
+    .btn-sm { padding: .35rem .7rem; font-size: .78rem; }
+
+    .actions { margin-top: 1rem; display: flex; gap: .5rem; flex-wrap: wrap; }
+
+    /* ── Response box ── */
+    .response-box {
+      margin-top: 1rem;
+      background: var(--code-bg);
+      border-radius: 8px;
+      padding: 1rem;
+      display: none;
+    }
+    .response-box.visible { display: block; }
+    .response-status {
+      font-size: .75rem;
+      font-weight: 700;
+      margin-bottom: .5rem;
+      display: flex;
+      align-items: center;
+      gap: .5rem;
+    }
+    .status-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      display: inline-block;
+    }
+    .ok   .status-dot { background: #4ade80; }
+    .err  .status-dot { background: #f87171; }
+    .response-box pre {
+      color: #e2e8f0;
+      font-size: .78rem;
+      overflow-x: auto;
+      line-height: 1.6;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+    .copy-btn {
+      float: right;
+      background: rgba(255,255,255,.1);
+      color: #e2e8f0;
+      border: none;
+      border-radius: 4px;
+      padding: .2rem .5rem;
+      font-size: .7rem;
+      cursor: pointer;
+    }
+    .copy-btn:hover { background: rgba(255,255,255,.2); }
+
+    /* ── Token banner ── */
+    .token-banner {
+      background: linear-gradient(135deg,#dcfce7,#d1fae5);
+      border: 1px solid #86efac;
+      border-radius: var(--radius);
+      padding: 1rem 1.25rem;
+      margin-bottom: 1.5rem;
+      display: none;
+    }
+    .token-banner.visible { display: block; }
+    .token-banner h3 { font-size: .9rem; color: var(--success); margin-bottom: .5rem; }
+    .token-banner pre {
+      font-size: .72rem;
+      word-break: break-all;
+      white-space: pre-wrap;
+      color: #166534;
+      background: rgba(255,255,255,.6);
+      padding: .5rem;
+      border-radius: 6px;
+    }
+
+    /* ── Provider list ── */
+    .provider-list { display: flex; flex-direction: column; gap: .75rem; }
+    .provider-card {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      flex-wrap: wrap;
+    }
+    .provider-card .info { flex: 1; min-width: 0; }
+    .provider-card .name { font-weight: 700; font-size: .95rem; }
+    .provider-card .meta { font-size: .78rem; color: var(--muted); margin-top: .2rem; }
+    .pill {
+      padding: .2rem .6rem;
+      border-radius: 20px;
+      font-size: .72rem;
+      font-weight: 700;
+    }
+    .pill-active   { background: #dcfce7; color: #15803d; }
+    .pill-inactive { background: #fee2e2; color: #b91c1c; }
+    .pill-type     { background: #ede9fe; color: #6d28d9; }
+
+    /* ── Tabs ── */
+    .tabs { display: flex; gap: 0; border-bottom: 2px solid var(--border); margin-bottom: 1.25rem; }
+    .tab-btn {
+      padding: .6rem 1.1rem;
+      border: none;
+      background: none;
+      font-size: .875rem;
+      font-weight: 600;
+      color: var(--muted);
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      margin-bottom: -2px;
+      transition: all .15s;
+    }
+    .tab-btn.active { color: var(--primary); border-bottom-color: var(--primary); }
+    .tab-pane { display: none; }
+    .tab-pane.active { display: block; }
+
+    /* ── Spinner ── */
+    .spinner {
+      width: 14px; height: 14px;
+      border: 2px solid rgba(255,255,255,.3);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin .6s linear infinite;
+      display: inline-block;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── Divider ── */
+    hr { border: none; border-top: 1px solid var(--border); margin: 1.25rem 0; }
+
+    /* ── Alert ── */
+    .alert {
+      padding: .75rem 1rem;
+      border-radius: 8px;
+      font-size: .85rem;
+      margin-bottom: 1rem;
+    }
+    .alert-info    { background: #dbeafe; color: #1e40af; }
+    .alert-success { background: #dcfce7; color: #166534; }
+    .alert-warning { background: #fef9c3; color: #92400e; }
+
+    /* ── Responsive ── */
+    @media(max-width: 768px) {
+      .layout { grid-template-columns: 1fr; }
+      nav {
+        position: static;
+        height: auto;
+        display: flex;
+        overflow-x: auto;
+        padding: .5rem 0;
+        border-right: none;
+        border-bottom: 1px solid var(--border);
+      }
+      nav .nav-section { display: none; }
+      nav a { border-left: none; border-bottom: 3px solid transparent; padding: .5rem .85rem; white-space: nowrap; }
+      nav a:hover, nav a.active {
+        border-left-color: transparent;
+        border-bottom-color: var(--primary);
+      }
+      main { padding: 1rem; }
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <div>
+    <div class="logo">🔐 SSO Manager</div>
+    <div class="sub">ASP.NET Core API Tester</div>
+  </div>
+  <span class="badge" id="authBadge">Not authenticated</span>
+</header>
+
+<div class="layout">
+
+  <!-- ── Sidebar ── -->
+  <nav id="sidebar">
+    <div class="nav-section">Setup</div>
+    <a href="#" data-section="config" class="active">⚙️ API Config</a>
+
+    <div class="nav-section">SSO Providers</div>
+    <a href="#" data-section="list-providers">📋 List Providers</a>
+    <a href="#" data-section="add-provider">➕ Add Provider</a>
+    <a href="#" data-section="get-provider">🔍 Get Provider</a>
+    <a href="#" data-section="update-provider">✏️ Update Provider</a>
+    <a href="#" data-section="delete-provider">🗑️ Delete Provider</a>
+    <a href="#" data-section="toggle-provider">🔄 Toggle Status</a>
+
+    <div class="nav-section">Authentication</div>
+    <a href="#" data-section="get-login-url">🔗 Get Login URL</a>
+    <a href="#" data-section="simulate-callback">📩 Callback</a>
+    <a href="#" data-section="logout">🚪 Logout</a>
+  </nav>
+
+  <!-- ── Main ── -->
+  <main>
+
+    <!-- Token Banner -->
+    <div class="token-banner" id="tokenBanner">
+      <h3>✅ Authenticated — App JWT stored</h3>
+      <pre id="tokenPreview"></pre>
+      <button class="btn btn-sm btn-outline" style="margin-top:.5rem" onclick="clearToken()">Clear Token</button>
+    </div>
+
+    <!-- ═══════════════ CONFIG ═══════════════ -->
+    <div class="section active" id="section-config">
+      <div class="card">
+        <div class="card-header"><h2>⚙️ API Base Configuration</h2></div>
+        <div class="card-body">
+          <div class="alert alert-info">
+            Set your API base URL and JWT token (obtained after SSO login) here.
+            These are used across all requests.
+          </div>
+          <div class="form-grid">
+            <div class="form-group full">
+              <label>API Base URL</label>
+              <input id="baseUrl" type="text" value="https://localhost:7001" placeholder="https://localhost:7001"/>
+            </div>
+            <div class="form-group full">
+              <label>Admin JWT Token (for provider management)</label>
+              <input id="adminToken" type="text" placeholder="Paste your JWT here..."/>
+            </div>
+          </div>
+          <div class="actions">
+            <button class="btn btn-primary" onclick="saveConfig()">💾 Save Config</button>
+            <button class="btn btn-outline" onclick="testPing()">🏓 Ping API</button>
+          </div>
+          <div class="response-box" id="resp-config"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header"><h2>📋 Quick Start Guide</h2></div>
+        <div class="card-body">
+          <ol style="line-height:2;font-size:.875rem;padding-left:1.25rem;">
+            <li>Set your <strong>API Base URL</strong> above and save.</li>
+            <li>Go to <strong>Add Provider</strong> and add your SSO provider (AzureAD, Google, Okta...).</li>
+            <li>Go to <strong>List Providers</strong> to verify it was saved.</li>
+            <li>Go to <strong>Get Login URL</strong> and click the authorize link to test SSO login.</li>
+            <li>After login the provider redirects to <strong>Callback</strong>, your app JWT is issued.</li>
+            <li>The JWT is saved here and used for all subsequent API calls.</li>
+          </ol>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══════════════ LIST PROVIDERS ═══════════════ -->
+    <div class="section" id="section-list-providers">
+      <div class="card">
+        <div class="card-header">
+          <span class="method GET">GET</span>
+          <h2>/api/ssoproviders</h2>
+        </div>
+        <div class="card-body">
+          <div class="form-grid">
+            <div class="form-group">
+              <label>Active Only</label>
+              <select id="listActiveOnly">
+                <option value="true">true</option>
+                <option value="false">false</option>
+              </select>
+            </div>
+          </div>
+          <div class="actions">
+            <button class="btn btn-primary" onclick="listProviders()">▶ Send Request</button>
+          </div>
+          <div class="response-box" id="resp-list"></div>
+
+          <div id="providerCards" class="provider-list" style="margin-top:1rem"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══════════════ ADD PROVIDER ═══════════════ -->
+    <div class="section" id="section-add-provider">
+      <div class="card">
+        <div class="card-header">
+          <span class="method POST">POST</span>
+          <h2>/api/ssoproviders</h2>
+        </div>
+        <div class="card-body">
+
+          <div class="tabs">
+            <button class="tab-btn active" data-tab="presets">🚀 Quick Presets</button>
+            <button class="tab-btn" data-tab="manual">✏️ Manual</button>
+          </div>
+
+          <div class="tab-pane active" id="tab-presets">
+            <div style="display:flex;gap:.5rem;flex-wrap:wrap;margin-bottom:1rem">
+              <button class="btn btn-outline btn-sm" onclick="loadPreset('azuread')">Azure AD</button>
+              <button class="btn btn-outline btn-sm" onclick="loadPreset('google')">Google</button>
+              <button class="btn btn-outline btn-sm" onclick="loadPreset('okta')">Okta</button>
+              <button class="btn btn-outline btn-sm" onclick="loadPreset('github')">GitHub</button>
+              <button class="btn btn-outline btn-sm" onclick="loadPreset('auth0')">Auth0</button>
+            </div>
+            <div class="alert alert-warning">
+              These are test configurations. Replace client IDs and secrets with real values from your identity provider.
+            </div>
+          </div>
+
+          <div class="tab-pane" id="tab-manual"></div>
+
+          <div class="form-grid" id="addProviderForm">
+            <div class="form-group">
+              <label>Provider Name *</label>
+              <input id="add_providerName" placeholder="AzureAD"/>
+            </div>
+            <div class="form-group">
+              <label>Provider Type *</label>
+              <select id="add_providerType">
+                <option value="OpenIdConnect">OpenIdConnect</option>
+                <option value="OAuth2">OAuth2</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Client ID *</label>
+              <input id="add_clientId" placeholder="Your client ID"/>
+            </div>
+            <div class="form-group">
+              <label>Client Secret *</label>
+              <input id="add_clientSecret" type="password" placeholder="Your client secret"/>
+            </div>
+            <div class="form-group full">
+              <label>Authority URL *</label>
+              <input id="add_authority" placeholder="https://login.microsoftonline.com/{tenant}/v2.0"/>
+            </div>
+            <div class="form-group">
+              <label>Grant Type</label>
+              <select id="add_grantType">
+                <option value="authorization_code">authorization_code</option>
+                <option value="client_credentials">client_credentials</option>
+                <option value="implicit">implicit</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Scope</label>
+              <input id="add_scope" placeholder="openid profile email"/>
+            </div>
+            <div class="form-group full">
+              <label>Redirect URI</label>
+              <input id="add_redirectUri" placeholder="https://yourapp.com/api/authentication/callback"/>
+            </div>
+            <div class="form-group full">
+              <label>Metadata URL</label>
+              <input id="add_metadataUrl" placeholder="https://.../.well-known/openid-configuration"/>
+            </div>
+            <div class="form-group full">
+              <label>Additional Settings (JSON key-value)</label>
+              <textarea id="add_additionalSettings" placeholder='{"tenant": "contoso.onmicrosoft.com"}'></textarea>
+            </div>
+            <div class="form-group">
+              <label>Active</label>
+              <select id="add_isActive">
+                <option value="true">true</option>
+                <option value="false">false</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="actions">
+            <button class="btn btn-primary" onclick="addProvider()">➕ Add Provider</button>
+            <button class="btn btn-outline" onclick="clearAddForm()">🧹 Clear</button>
+          </div>
+          <div class="response-box" id="resp-add"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══════════════ GET PROVIDER ═══════════════ -->
+    <div class="section" id="section-get-provider">
+      <div class="card">
+        <div class="card-header">
+          <span class="method GET">GET</span>
+          <h2>/api/ssoproviders/{id} or by-name/{name}</h2>
+        </div>
+        <div class="card-body">
+          <div class="form-grid">
+            <div class="form-group">
+              <label>Search By</label>
+              <select id="getBy" onchange="toggleGetBy()">
+                <option value="id">ID (GUID)</option>
+                <option value="name">Name</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label id="getValueLabel">Provider ID (GUID)</label>
+              <input id="getProviderValue" placeholder="Enter provider ID or name"/>
+            </div>
+          </div>
+          <div class="actions">
+            <button class="btn btn-primary" onclick="getProvider()">🔍 Get Provider</button>
+          </div>
+          <div class="response-box" id="resp-get"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══════════════ UPDATE PROVIDER ═══════════════ -->
+    <div class="section" id="section-update-provider">
+      <div class="card">
+        <div class="card-header">
+          <span class="method PUT">PUT</span>
+          <h2>/api/ssoproviders/{id}</h2>
+        </div>
+        <div class="card-body">
+          <div class="form-grid">
+            <div class="form-group">
+              <label>Provider ID (GUID) *</label>
+              <input id="upd_id" placeholder="Paste provider GUID"/>
+            </div>
+            <div class="form-group">
+              <label>Provider Name</label>
+              <input id="upd_providerName"/>
+            </div>
+            <div class="form-group">
+              <label>Provider Type</label>
+              <select id="upd_providerType">
+                <option value="OpenIdConnect">OpenIdConnect</option>
+                <option value="OAuth2">OAuth2</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Client ID</label>
+              <input id="upd_clientId"/>
+            </div>
+            <div class="form-group">
+              <label>Client Secret (leave blank to keep)</label>
+              <input id="upd_clientSecret" type="password"/>
+            </div>
+            <div class="form-group full">
+              <label>Authority URL</label>
+              <input id="upd_authority"/>
+            </div>
+            <div class="form-group">
+              <label>Grant Type</label>
+              <select id="upd_grantType">
+                <option value="authorization_code">authorization_code</option>
+                <option value="client_credentials">client_credentials</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Scope</label>
+              <input id="upd_scope"/>
+            </div>
+            <div class="form-group full">
+              <label>Redirect URI</label>
+              <input id="upd_redirectUri"/>
+            </div>
+            <div class="form-group">
+              <label>Active</label>
+              <select id="upd_isActive">
+                <option value="true">true</option>
+                <option value="false">false</option>
+              </select>
+            </div>
+          </div>
+          <div class="actions">
+            <button class="btn btn-warning" onclick="updateProvider()">✏️ Update Provider</button>
+          </div>
+          <div class="response-box" id="resp-update"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══════════════ DELETE PROVIDER ═══════════════ -->
+    <div class="section" id="section-delete-provider">
+      <div class="card">
+        <div class="card-header">
+          <span class="method DELETE">DELETE</span>
+          <h2>/api/ssoproviders/{id}</h2>
+        </div>
+        <div class="card-body">
+          <div class="alert alert-warning">⚠️ This permanently deletes the provider and all associated user mappings.</div>
+          <div class="form-grid">
+            <div class="form-group">
+              <label>Provider ID (GUID) *</label>
+              <input id="del_id" placeholder="Paste provider GUID to delete"/>
+            </div>
+          </div>
+          <div class="actions">
+            <button class="btn btn-danger" onclick="deleteProvider()">🗑️ Delete Provider</button>
+          </div>
+          <div class="response-box" id="resp-delete"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══════════════ TOGGLE STATUS ═══════════════ -->
+    <div class="section" id="section-toggle-provider">
+      <div class="card">
+        <div class="card-header">
+          <span class="method PATCH">PATCH</span>
+          <h2>/api/ssoproviders/{id}/toggle-status</h2>
+        </div>
+        <div class="card-body">
+          <div class="form-grid">
+            <div class="form-group">
+              <label>Provider ID (GUID) *</label>
+              <input id="tog_id" placeholder="Paste provider GUID"/>
+            </div>
+          </div>
+          <div class="actions">
+            <button class="btn btn-primary" onclick="toggleStatus()">🔄 Toggle Active/Inactive</button>
+          </div>
+          <div class="response-box" id="resp-toggle"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══════════════ GET LOGIN URL ═══════════════ -->
+    <div class="section" id="section-get-login-url">
+      <div class="card">
+        <div class="card-header">
+          <span class="method GET">GET</span>
+          <h2>/api/authentication/login-url/{providerName}</h2>
+        </div>
+        <div class="card-body">
+          <div class="form-grid">
+            <div class="form-group">
+              <label>Provider Name *</label>
+              <input id="login_providerName" placeholder="AzureAD"/>
+            </div>
+            <div class="form-group">
+              <label>Return URL</label>
+              <input id="login_returnUrl" value="/dashboard"/>
+            </div>
+          </div>
+          <div class="actions">
+            <button class="btn btn-primary" onclick="getLoginUrl()">🔗 Get Authorize URL</button>
+          </div>
+          <div class="response-box" id="resp-login"></div>
+
+          <div id="loginLinkBox" style="display:none;margin-top:1rem">
+            <div class="alert alert-success">
+              ✅ Authorization URL generated. Click below to initiate SSO login in a new tab.
+            </div>
+            <a id="loginLink" href="#" target="_blank">
+              <button class="btn btn-success">🚀 Open Login Page</button>
+            </a>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <span class="method GET">GET</span>
+          <h2>/api/authentication/providers (public list)</h2>
+        </div>
+        <div class="card-body">
+          <div class="actions">
+            <button class="btn btn-primary" onclick="getPublicProviders()">▶ List Active Providers</button>
+          </div>
+          <div class="response-box" id="resp-public-providers"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══════════════ CALLBACK ═══════════════ -->
+    <div class="section" id="section-simulate-callback">
+      <div class="card">
+        <div class="card-header">
+          <span class="method GET">GET</span>
+          <h2>/api/authentication/callback</h2>
+        </div>
+        <div class="card-body">
+          <div class="alert alert-info">
+            After the identity provider redirects back to your API with an authorization code,
+            this endpoint handles token exchange. In production the browser navigates here automatically.
+            Use the fields below to simulate or inspect a callback.
+          </div>
+          <div class="form-grid">
+            <div class="form-group">
+              <label>Provider Name</label>
+              <input id="cb_providerName" placeholder="AzureAD"/>
+            </div>
+            <div class="form-group">
+              <label>Code (from provider redirect)</label>
+              <input id="cb_code" placeholder="AUTH_CODE_FROM_PROVIDER"/>
+            </div>
+            <div class="form-group">
+              <label>State</label>
+              <input id="cb_state" placeholder="state value from login-url response"/>
+            </div>
+          </div>
+          <div class="actions">
+            <button class="btn btn-primary" onclick="simulateCallback()">▶ Simulate Callback</button>
+          </div>
+          <div class="response-box" id="resp-callback"></div>
+
+          <hr/>
+          <h3 style="font-size:.9rem;font-weight:700;margin-bottom:.5rem">📥 Paste Token from UI Redirect</h3>
+          <p style="font-size:.8rem;color:var(--muted);margin-bottom:.75rem">
+            After a real login, your UI receives a <code>?token=</code> query param. Paste it here to store it for testing.
+          </p>
+          <div class="form-group">
+            <label>App JWT</label>
+            <input id="manualToken" placeholder="Paste JWT from ?token= query param"/>
+          </div>
+          <div class="actions">
+            <button class="btn btn-success" onclick="storeManualToken()">💾 Store Token</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══════════════ LOGOUT ═══════════════ -->
+    <div class="section" id="section-logout">
+      <div class="card">
+        <div class="card-header">
+          <span class="method POST">POST</span>
+          <h2>/api/authentication/logout</h2>
+        </div>
+        <div class="card-body">
+          <div class="alert alert-info">
+            Since the app uses stateless JWTs, logout clears the stored token in this tester.
+            In production, also clear the token from localStorage / cookies in your UI.
+          </div>
+          <div class="actions">
+            <button class="btn btn-danger" onclick="logout()">🚪 Logout</button>
+          </div>
+          <div class="response-box" id="resp-logout"></div>
+        </div>
+      </div>
+    </div>
+
+  </main>
+</div>
+
+<script>
+  // ─────────────── State ───────────────
+  let BASE_URL = localStorage.getItem('sso_base_url') || 'https://localhost:7001';
+  let ADMIN_TOKEN = localStorage.getItem('sso_admin_token') || '';
+  let APP_TOKEN = localStorage.getItem('sso_app_token') || '';
+
+  document.getElementById('baseUrl').value = BASE_URL;
+  document.getElementById('adminToken').value = ADMIN_TOKEN;
+  updateTokenBanner();
+
+  // ─────────────── Presets ───────────────
+  const PRESETS = {
+    azuread: {
+      providerName: 'AzureAD',
+      providerType: 'OpenIdConnect',
+      clientId: 'a1b2c3d4-5678-90ab-cdef-1234567890ab',
+      clientSecret: 'FyX7Q~DuPJ3kLmN8pQrStUvWxYz.AbCdEfGhIjKl',
+      authority: 'https://login.microsoftonline.com/contoso.onmicrosoft.com',
+      grantType: 'authorization_code',
+      scope: 'openid profile email User.Read',
+      redirectUri: `${BASE_URL}/api/authentication/callback`,
+      metadataUrl: 'https://login.microsoftonline.com/contoso.onmicrosoft.com/v2.0/.well-known/openid-configuration',
+      isActive: true,
+      additionalSettings: { tenant: 'contoso.onmicrosoft.com', responseType: 'code' }
+    },
+    google: {
+      providerName: 'Google',
+      providerType: 'OpenIdConnect',
+      clientId: '123456789012-abc3defg4hijklmno5pqrstu6vwxyz78.apps.googleusercontent.com',
+      clientSecret: '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t',
+      authority: 'https://accounts.google.com',
+      grantType: 'authorization_code',
+      scope: 'openid profile email',
+      redirectUri: `${BASE_URL}/api/authentication/callback`,
+      metadataUrl: 'https://accounts.google.com/.well-known/openid-configuration',
+      isActive: true,
+      additionalSettings: { accessType: 'offline', prompt: 'consent' }
+    },
+    okta: {
+      providerName: 'Okta',
+      providerType: 'OpenIdConnect',
+      clientId: '0oa2b3c4d5e6f7g8h9i0',
+      clientSecret: 'Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9St0Uv1Wx2Yz3',
+      authority: 'https://dev-123456.okta.com/oauth2/default',
+      grantType: 'authorization_code',
+      scope: 'openid email profile groups',
+      redirectUri: `${BASE_URL}/api/authentication/callback`,
+      metadataUrl: 'https://dev-123456.okta.com/oauth2/default/.well-known/openid-configuration',
+      isActive: true,
+      additionalSettings: { jwsAlgorithm: 'RS256', clientAuthMethod: 'client_secret_basic' }
+    },
+    github: {
+      providerName: 'GitHub',
+      providerType: 'OAuth2',
+      clientId: 'Iv1.a1b2c3d4e5f6g7h8',
+      clientSecret: '1a2b3c4d5e6f7g8h9i0j1k2l3m4n5o6p7q8r9s0t',
+      authority: 'https://github.com/login/oauth',
+      grantType: 'authorization_code',
+      scope: 'read:user user:email',
+      redirectUri: `${BASE_URL}/api/authentication/callback`,
+      metadataUrl: '',
+      isActive: true,
+      additionalSettings: { tokenEndpoint: 'https://github.com/login/oauth/access_token', userEndpoint: 'https://api.github.com/user' }
+    },
+    auth0: {
+      providerName: 'Auth0',
+      providerType: 'OpenIdConnect',
+      clientId: 'AbCdEfGhIjKlMnOpQrStUvWxYz123456',
+      clientSecret: 'Ab1_Cd2-Ef3_Gh4-Ij5_Kl6-Mn7_Op8-Qr9_St0',
+      authority: 'https://yourcompany.us.auth0.com',
+      grantType: 'authorization_code',
+      scope: 'openid profile email',
+      redirectUri: `${BASE_URL}/api/authentication/callback`,
+      metadataUrl: 'https://yourcompany.us.auth0.com/.well-known/openid-configuration',
+      isActive: true,
+      additionalSettings: { audience: 'https://yourcompany.com/api' }
+    }
+  };
+
+  function loadPreset(key) {
+    const p = PRESETS[key];
+    if (!p) return;
+    document.getElementById('add_providerName').value = p.providerName;
+    document.getElementById('add_providerType').value = p.providerType;
+    document.getElementById('add_clientId').value = p.clientId;
+    document.getElementById('add_clientSecret').value = p.clientSecret;
+    document.getElementById('add_authority').value = p.authority;
+    document.getElementById('add_grantType').value = p.grantType;
+    document.getElementById('add_scope').value = p.scope;
+    document.getElementById('add_redirectUri').value = p.redirectUri;
+    document.getElementById('add_metadataUrl').value = p.metadataUrl || '';
+    document.getElementById('add_additionalSettings').value = JSON.stringify(p.additionalSettings, null, 2);
+    document.getElementById('add_isActive').value = 'true';
+  }
+
+  // ─────────────── Navigation ───────────────
+  document.querySelectorAll('nav a').forEach(a => {
+    a.addEventListener('click', e => {
+      e.preventDefault();
+      const sec = a.dataset.section;
+      document.querySelectorAll('nav a').forEach(x => x.classList.remove('active'));
+      document.querySelectorAll('.section').forEach(x => x.classList.remove('active'));
+      a.classList.add('active');
+      document.getElementById('section-' + sec)?.classList.add('active');
+    });
+  });
+
+  // ─────────────── Tabs ───────────────
+  document.querySelectorAll('.tab-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const parent = btn.closest('.card-body');
+      parent.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      parent.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
+      btn.classList.add('active');
+      parent.querySelector('#tab-' + btn.dataset.tab)?.classList.add('active');
+    });
+  });
+
+  // ─────────────── Config ───────────────
+  function saveConfig() {
+    BASE_URL = document.getElementById('baseUrl').value.replace(/\/$/, '');
+    ADMIN_TOKEN = document.getElementById('adminToken').value;
+    localStorage.setItem('sso_base_url', BASE_URL);
+    localStorage.setItem('sso_admin_token', ADMIN_TOKEN);
+    showResponse('resp-config', 200, { message: 'Config saved!', baseUrl: BASE_URL });
+  }
+
+  async function testPing() {
+    const btn = event.currentTarget;
+    setLoading(btn, true);
+    try {
+      const r = await fetch(`${BASE_URL}/swagger/index.html`);
+      showResponse('resp-config', r.status,
+        { message: r.ok ? '✅ API is reachable' : '⚠️ Unexpected response', status: r.status });
+    } catch {
+      showResponse('resp-config', 0, { error: 'Cannot reach API. Check baseUrl and CORS settings.' });
+    } finally { setLoading(btn, false); }
+  }
+
+  // ─────────────── Helpers ───────────────
+  function getHeaders(isAdmin = true) {
+    const h = { 'Content-Type': 'application/json' };
+    const token = isAdmin ? ADMIN_TOKEN : APP_TOKEN;
+    if (token) h['Authorization'] = `Bearer ${token}`;
+    return h;
+  }
+
+  function showResponse(id, status, data) {
+    const box = document.getElementById(id);
+    const isOk = status >= 200 && status < 300;
+    box.className = 'response-box visible ' + (isOk ? 'ok' : 'err');
+    const copyId = 'copy-' + id;
+    box.innerHTML = `
+      <div class="response-status ${isOk ? 'ok' : 'err'}">
+        <span class="status-dot"></span>
+        <span style="color:${isOk ? '#4ade80' : '#f87171'}">
+          ${status === 0 ? 'Network Error' : 'HTTP ' + status}
+        </span>
+        <button class="copy-btn" id="${copyId}" onclick="copyResponse('${id}')">Copy</button>
+      </div>
+      <pre>${JSON.stringify(data, null, 2)}</pre>`;
+  }
+
+  function copyResponse(id) {
+    const pre = document.querySelector(`#${id} pre`);
+    navigator.clipboard.writeText(pre.textContent);
+    const btn = document.getElementById('copy-' + id);
+    btn.textContent = '✅ Copied';
+    setTimeout(() => btn.textContent = 'Copy', 1500);
+  }
+
+  function setLoading(btn, loading) {
+    if (loading) {
+      btn.dataset.orig = btn.innerHTML;
+      btn.innerHTML = '<span class="spinner"></span> Loading...';
+      btn.disabled = true;
+    } else {
+      btn.innerHTML = btn.dataset.orig;
+      btn.disabled = false;
+    }
+  }
+
+  async function apiFetch(method, path, body = null, useAdminToken = true) {
+    const opts = { method, headers: getHeaders(useAdminToken) };
+    if (body) opts.body = JSON.stringify(body);
+    const r = await fetch(BASE_URL + path, opts);
+    let data;
+    const ct = r.headers.get('content-type') || '';
+    try {
+      data = ct.includes('json') ? await r.json() : { message: await r.text() };
+    } catch { data = { message: 'Empty response' }; }
+    return { status: r.status, data };
+  }
+
+  // ─────────────── Providers CRUD ───────────────
+  async function listProviders() {
+    const btn = event.currentTarget; setLoading(btn, true);
+    const activeOnly = document.getElementById('listActiveOnly').value;
+    try {
+      const { status, data } = await apiFetch('GET', `/api/ssoproviders?activeOnly=${activeOnly}`);
+      showResponse('resp-list', status, data);
+      renderProviderCards(Array.isArray(data) ? data : []);
+    } catch (e) {
+      showResponse('resp-list', 0, { error: e.message });
+    } finally { setLoading(btn, false); }
+  }
+
+  function renderProviderCards(providers) {
+    const container = document.getElementById('providerCards');
+    if (!providers.length) { container.innerHTML = '<p style="color:var(--muted);font-size:.85rem">No providers found.</p>'; return; }
+    container.innerHTML = providers.map(p => `
+      <div class="provider-card">
+        <div class="info">
+          <div class="name">${p.providerName}</div>
+          <div class="meta">
+            <span class="pill pill-type">${p.providerType}</span>
+            &nbsp;Client ID: <code>${p.clientId}</code>
+            &nbsp;|&nbsp;${p.authority || ''}
+          </div>
+        </div>
+        <div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap">
+          <span class="pill ${p.isActive ? 'pill-active' : 'pill-inactive'}">${p.isActive ? 'Active' : 'Inactive'}</span>
+          <button class="btn btn-sm btn-outline" onclick="prefillUpdate('${p.id}','${p.providerName}','${p.providerType}','${p.clientId}','${p.authority}','${p.scope}','${p.redirectUri}','${p.isActive}')">Edit</button>
+          <button class="btn btn-sm btn-danger" onclick="quickDelete('${p.id}')">Delete</button>
+          <button class="btn btn-sm btn-outline" onclick="quickToggle('${p.id}')">Toggle</button>
+        </div>
+      </div>`).join('');
+  }
+
+  async function addProvider() {
+    const btn = event.currentTarget; setLoading(btn, true);
+    let additionalSettings = {};
+    try {
+      const raw = document.getElementById('add_additionalSettings').value.trim();
+      if (raw) additionalSettings = JSON.parse(raw);
+    } catch { showResponse('resp-add', 400, { error: 'Invalid JSON in Additional Settings' }); setLoading(btn, false); return; }
+
+    const body = {
+      providerName: document.getElementById('add_providerName').value,
+      providerType: document.getElementById('add_providerType').value,
+      clientId: document.getElementById('add_clientId').value,
+      clientSecret: document.getElementById('add_clientSecret').value,
+      authority: document.getElementById('add_authority').value,
+      grantType: document.getElementById('add_grantType').value,
+      scope: document.getElementById('add_scope').value,
+      redirectUri: document.getElementById('add_redirectUri').value,
+      metadataUrl: document.getElementById('add_metadataUrl').value,
+      isActive: document.getElementById('add_isActive').value === 'true',
+      additionalSettings
+    };
+
+    try {
+      const { status, data } = await apiFetch('POST', '/api/ssoproviders', body);
+      showResponse('resp-add', status, data);
+      if (status === 201) clearAddForm();
+    } catch (e) {
+      showResponse('resp-add', 0, { error: e.message });
+    } finally { setLoading(btn, false); }
+  }
+
+  function clearAddForm() {
+    ['add_providerName','add_clientId','add_clientSecret','add_authority',
+     'add_scope','add_redirectUri','add_metadataUrl','add_additionalSettings']
+      .forEach(id => document.getElementById(id).value = '');
+  }
+
+  async function getProvider() {
+    const btn = event.currentTarget; setLoading(btn, true);
+    const by = document.getElementById('getBy').value;
+    const val = document.getElementById('getProviderValue').value;
+    const path = by === 'id' ? `/api/ssoproviders/${val}` : `/api/ssoproviders/by-name/${val}`;
+    try {
+      const { status, data } = await apiFetch('GET', path);
+      showResponse('resp-get', status, data);
+    } catch (e) { showResponse('resp-get', 0, { error: e.message }); }
+    finally { setLoading(btn, false); }
+  }
+
+  function toggleGetBy() {
+    const by = document.getElementById('getBy').value;
+    document.getElementById('getValueLabel').textContent = by === 'id' ? 'Provider ID (GUID)' : 'Provider Name';
+    document.getElementById('getProviderValue').placeholder = by === 'id' ? 'e.g. a1b2c3d4-...' : 'e.g. AzureAD';
+  }
+
+  function prefillUpdate(id, name, type, clientId, authority, scope, redirectUri, isActive) {
+    document.querySelectorAll('nav a').forEach(x => x.classList.remove('active'));
+    document.querySelectorAll('.section').forEach(x => x.classList.remove('active'));
+    document.querySelector('[data-section="update-provider"]').classList.add('active');
+    document.getElementById('section-update-provider').classList.add('active');
+    document.getElementById('upd_id').value = id;
+    document.getElementById('upd_providerName').value = name;
+    document.getElementById('upd_providerType').value = type;
+    document.getElementById('upd_clientId').value = clientId;
+    document.getElementById('upd_authority').value = authority;
+    document.getElementById('upd_scope').value = scope;
+    document.getElementById('upd_redirectUri').value = redirectUri;
+    document.getElementById('upd_isActive').value = isActive.toString();
+  }
+
+  async function updateProvider() {
+    const btn = event.currentTarget; setLoading(btn, true);
+    const id = document.getElementById('upd_id').value;
+    const body = {
+      providerName: document.getElementById('upd_providerName').value,
+      providerType: document.getElementById('upd_providerType').value,
+      clientId: document.getElementById('upd_clientId').value,
+      clientSecret: document.getElementById('upd_clientSecret').value,
+      authority: document.getElementById('upd_authority').value,
+      grantType: document.getElementById('upd_grantType').value,
+      scope: document.getElementById('upd_scope').value,
+      redirectUri: document.getElementById('upd_redirectUri').value,
+      isActive: document.getElementById('upd_isActive').value === 'true'
+    };
+    try {
+      const { status, data } = await apiFetch('PUT', `/api/ssoproviders/${id}`, body);
+      showResponse('resp-update', status, data);
+    } catch (e) { showResponse('resp-update', 0, { error: e.message }); }
+    finally { setLoading(btn, false); }
+  }
+
+  async function deleteProvider() {
+    const btn = event.currentTarget; setLoading(btn, true);
+    const id = document.getElementById('del_id').value;
+    if (!confirm(`Delete provider ${id}? This cannot be undone.`)) { setLoading(btn, false); return; }
+    try {
+      const { status, data } = await apiFetch('DELETE', `/api/ssoproviders/${id}`);
+      showResponse('resp-delete', status, status === 204 ? { message: 'Deleted successfully' } : data);
+    } catch (e) { showResponse('resp-delete', 0, { error: e.message }); }
+    finally { setLoading(btn, false); }
+  }
+
+  async function quickDelete(id) {
+    if (!confirm(`Delete provider ${id}?`)) return;
+    document.getElementById('del_id').value = id;
+    const { status, data } = await apiFetch('DELETE', `/api/ssoproviders/${id}`);
+    showResponse('resp-delete', status, status === 204 ? { message: 'Deleted' } : data);
+    listProviders();
+  }
+
+  async function toggleStatus() {
+    const btn = event.currentTarget; setLoading(btn, true);
+    const id = document.getElementById('tog_id').value;
+    try {
+      const { status, data } = await apiFetch('PATCH', `/api/ssoproviders/${id}/toggle-status`);
+      showResponse('resp-toggle', status, status === 204 ? { message: 'Status toggled' } : data);
+    } catch (e) { showResponse('resp-toggle', 0, { error: e.message }); }
+    finally { setLoading(btn, false); }
+  }
+
+  async function quickToggle(id) {
+    document.getElementById('tog_id').value = id;
+    const { status, data } = await apiFetch('PATCH', `/api/ssoproviders/${id}/toggle-status`);
+    showResponse('resp-toggle', status, status === 204 ? { message: 'Toggled' } : data);
+    listProviders();
+  }
+
+  // ─────────────── Auth ───────────────
+  async function getPublicProviders() {
+    const btn = event.currentTarget; setLoading(btn, true);
+    try {
+      const { status, data } = await apiFetch('GET', '/api/authentication/providers', null, false);
+      showResponse('resp-public-providers', status, data);
+    } catch (e) { showResponse('resp-public-providers', 0, { error: e.message }); }
+    finally { setLoading(btn, false); }
+  }
+
+  async function getLoginUrl() {
+    const btn = event.currentTarget; setLoading(btn, true);
+    const name = document.getElementById('login_providerName').value;
+    const ret  = document.getElementById('login_returnUrl').value;
+    try {
+      const { status, data } = await apiFetch('GET',
+        `/api/authentication/login-url/${name}?returnUrl=${encodeURIComponent(ret)}`, null, false);
+      showResponse('resp-login', status, data);
+      if (data.authorizeUrl) {
+        document.getElementById('loginLink').href = data.authorizeUrl;
+        document.getElementById('loginLinkBox').style.display = 'block';
+        // Prefill state on callback page
+        document.getElementById('cb_state').value = data.state || '';
+        document.getElementById('cb_providerName').value = name;
+      }
+    } catch (e) { showResponse('resp-login', 0, { error: e.message }); }
+    finally { setLoading(btn, false); }
+  }
+
+  async function simulateCallback() {
+    const btn = event.currentTarget; setLoading(btn, true);
+    const prov  = document.getElementById('cb_providerName').value;
+    const code  = document.getElementById('cb_code').value;
+    const state = document.getElementById('cb_state').value;
+    const url   = `${BASE_URL}/api/authentication/callback?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`;
+    try {
+      // Note: real callback is a browser redirect, so open it in new tab
+      showResponse('resp-callback', 200, {
+        note: 'In production the browser navigates here automatically. Opening in new tab...',
+        url
+      });
+      window.open(url, '_blank');
+    } catch (e) { showResponse('resp-callback', 0, { error: e.message }); }
+    finally { setLoading(btn, false); }
+  }
+
+  function storeManualToken() {
+    const token = document.getElementById('manualToken').value.trim();
+    if (!token) { alert('Please paste a JWT token'); return; }
+    APP_TOKEN = token;
+    localStorage.setItem('sso_app_token', token);
+    updateTokenBanner();
+    showResponse('resp-callback', 200, { message: 'Token stored! Use it for authenticated requests.' });
+  }
+
+  async function logout() {
+    const btn = event.currentTarget; setLoading(btn, true);
+    try {
+      const { status, data } = await apiFetch('POST', '/api/authentication/logout', null, false);
+      showResponse('resp-logout', status, data);
+      clearToken();
+    } catch (e) { showResponse('resp-logout', 0, { error: e.message }); }
+    finally { setLoading(btn, false); }
+  }
+
+  // ─────────────── Token banner ───────────────
+  function updateTokenBanner() {
+    const banner = document.getElementById('tokenBanner');
+    const badge = document.getElementById('authBadge');
+    if (APP_TOKEN) {
+      banner.classList.add('visible');
+      document.getElementById('tokenPreview').textContent = APP_TOKEN;
+      badge.textContent = '🟢 Authenticated';
+    } else {
+      banner.classList.remove('visible');
+      badge.textContent = 'Not authenticated';
+    }
+  }
+
+  function clearToken() {
+    APP_TOKEN = '';
+    localStorage.removeItem('sso_app_token');
+    document.getElementById('manualToken').value = '';
+    updateTokenBanner();
+  }
+
+  // ─────────────── Check ?token= on load ───────────────
+  (function checkCallbackToken() {
+    const params = new URLSearchParams(window.location.search);
+    const token = params.get('token');
+    if (token) {
+      APP_TOKEN = token;
+      localStorage.setItem('sso_app_token', token);
+      updateTokenBanner();
+      window.history.replaceState({}, '', window.location.pathname);
+      document.querySelector('[data-section="simulate-callback"]').click();
+    }
+  })();
+</script>
+</body>
+</html>
