@@ -1,0 +1,548 @@
+Looking at your existing code, I can see exactly what needs to change:
+
+Problems identified:
+
+    Login calls Challenge(properties, providerName) — this requires ASP.NET to have a registered scheme for "AzureAD" which doesn't exist dynamically
+
+    Callback calls HttpContext.AuthenticateAsync() — relies on ASP.NET's auth middleware cookie, not a manual flow
+
+    Provider type is OAuth2 but the authority is Azure AD which supports OIDC — we can build endpoints directly from authority
+
+Here is the complete rewrite of the controller and all supporting pieces:
+1. New Services Needed
+IJwtTokenService
+
+csharp
+// Services/IJwtTokenService.cs
+namespace SSOManagement.API.Services
+{
+    public interface IJwtTokenService
+    {
+        string GenerateToken(UserInfo user);
+    }
+
+    public class UserInfo
+    {
+        public string ExternalUserId { get; set; }
+        public string Email { get; set; }
+        public string Name { get; set; }
+        public string ProviderName { get; set; }
+    }
+}
+
+// Services/JwtTokenService.cs
+using System.IdentityModel.Tokens.Jwt;
+using System.Security.Claims;
+using System.Text;
+using Microsoft.IdentityModel.Tokens;
+
+namespace SSOManagement.API.Services
+{
+    public class JwtTokenService : IJwtTokenService
+    {
+        private readonly IConfiguration _config;
+
+        public JwtTokenService(IConfiguration config)
+        {
+            _config = config;
+        }
+
+        public string GenerateToken(UserInfo user)
+        {
+            var key = new SymmetricSecurityKey(
+                Encoding.UTF8.GetBytes(_config["Jwt:SecretKey"]));
+
+            var credentials = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
+
+            var claims = new[]
+            {
+                new Claim(JwtRegisteredClaimNames.Sub, user.ExternalUserId),
+                new Claim(JwtRegisteredClaimNames.Email, user.Email ?? ""),
+                new Claim(JwtRegisteredClaimNames.Name, user.Name ?? ""),
+                new Claim("provider", user.ProviderName),
+                new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString())
+            };
+
+            var token = new JwtSecurityToken(
+                issuer: _config["Jwt:Issuer"],
+                audience: _config["Jwt:Audience"],
+                claims: claims,
+                expires: DateTime.UtcNow.AddHours(8),
+                signingCredentials: credentials
+            );
+
+            return new JwtSecurityTokenHandler().WriteToken(token);
+        }
+    }
+}
+
+IStateStore (for CSRF protection via state param)
+
+csharp
+// Services/IStateStore.cs
+namespace SSOManagement.API.Services
+{
+    public interface IStateStore
+    {
+        Task SaveAsync(string state, string providerName, string returnUrl);
+        Task<(string providerName, string returnUrl)?> GetAndRemoveAsync(string state);
+    }
+}
+
+// Services/InMemoryStateStore.cs (use Redis in production)
+using System.Collections.Concurrent;
+
+namespace SSOManagement.API.Services
+{
+    public class InMemoryStateStore : IStateStore
+    {
+        private readonly ConcurrentDictionary<string, (string provider, string returnUrl, DateTime expiry)> _store = new();
+
+        public Task SaveAsync(string state, string providerName, string returnUrl)
+        {
+            _store[state] = (providerName, returnUrl, DateTime.UtcNow.AddMinutes(10));
+            return Task.CompletedTask;
+        }
+
+        public Task<(string providerName, string returnUrl)?> GetAndRemoveAsync(string state)
+        {
+            if (_store.TryRemove(state, out var entry))
+            {
+                if (entry.expiry > DateTime.UtcNow)
+                    return Task.FromResult<(string, string)?>((entry.provider, entry.returnUrl));
+            }
+            return Task.FromResult<(string, string)?>(null);
+        }
+    }
+}
+
+2. Rewritten AuthenticationController
+
+csharp
+// Controllers/AuthenticationController.cs
+using System.IdentityModel.Tokens.Jwt;
+using System.Net.Http.Headers;
+using System.Text;
+using System.Text.Json;
+using System.Web;
+using Microsoft.AspNetCore.Mvc;
+using SSOManagement.API.Models.DTOs;
+using SSOManagement.API.Services;
+using SSOManagement.API.Data;
+using Microsoft.EntityFrameworkCore;
+
+namespace SSOManagement.API.Controllers
+{
+    [ApiController]
+    [Route("api/[controller]")]
+    public class AuthenticationController : ControllerBase
+    {
+        private readonly ISSOProviderService _ssoProviderService;
+        private readonly IEncryptionService _encryptionService;
+        private readonly IJwtTokenService _jwtTokenService;
+        private readonly IStateStore _stateStore;
+        private readonly IHttpClientFactory _httpClientFactory;
+        private readonly IConfiguration _config;
+        private readonly ILogger<AuthenticationController> _logger;
+
+        public AuthenticationController(
+            ISSOProviderService ssoProviderService,
+            IEncryptionService encryptionService,
+            IJwtTokenService jwtTokenService,
+            IStateStore stateStore,
+            IHttpClientFactory httpClientFactory,
+            IConfiguration config,
+            ILogger<AuthenticationController> logger)
+        {
+            _ssoProviderService = ssoProviderService;
+            _encryptionService = encryptionService;
+            _jwtTokenService = jwtTokenService;
+            _stateStore = stateStore;
+            _httpClientFactory = httpClientFactory;
+            _config = config;
+            _logger = logger;
+        }
+
+        // GET api/authentication/providers
+        [HttpGet("providers")]
+        public async Task<ActionResult<IEnumerable<SSOProviderResponseDto>>> GetAvailableProviders()
+        {
+            var providers = await _ssoProviderService.GetAllProvidersAsync(activeOnly: true);
+            return Ok(providers);
+        }
+
+        // GET api/authentication/login-url/{providerName}?returnUrl=/dashboard
+        // UI calls this, gets back the authorize URL, then does window.location.href = url
+        [HttpGet("login-url/{providerName}")]
+        public async Task<IActionResult> GetLoginUrl(
+            string providerName,
+            [FromQuery] string returnUrl = "/")
+        {
+            try
+            {
+                var provider = await _ssoProviderService.GetProviderByNameAsync(providerName);
+
+                if (!provider.IsActive)
+                    return BadRequest($"SSO provider '{providerName}' is not active");
+
+                // Build authorize endpoint from authority
+                // Azure AD: https://login.microsoftonline.com/{tenant}/oauth2/v2.0/authorize
+                var authorizeEndpoint = BuildAuthorizeEndpoint(provider.Authority, provider.ProviderType);
+
+                // Generate cryptographically random state for CSRF protection
+                var state = Convert.ToBase64String(Guid.NewGuid().ToByteArray())
+                    .Replace("+", "-").Replace("/", "_").TrimEnd('=');
+
+                // Save state → providerName + returnUrl mapping
+                await _stateStore.SaveAsync(state, providerName, returnUrl);
+
+                // Build full redirect URL for this API's callback
+                var callbackUri = $"{Request.Scheme}://{Request.Host}/api/authentication/callback";
+
+                var queryParams = HttpUtility.ParseQueryString(string.Empty);
+                queryParams["client_id"]     = provider.ClientId;
+                queryParams["response_type"] = "code";
+                queryParams["redirect_uri"]  = callbackUri;
+                queryParams["scope"]         = provider.Scope ?? "openid profile email";
+                queryParams["state"]         = state;
+                queryParams["response_mode"] = "query";
+
+                var authorizeUrl = $"{authorizeEndpoint}?{queryParams}";
+
+                _logger.LogInformation("Generated login URL for provider: {ProviderName}", providerName);
+
+                return Ok(new
+                {
+                    authorizeUrl,
+                    state,
+                    providerName
+                });
+            }
+            catch (KeyNotFoundException ex)
+            {
+                return NotFound(ex.Message);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error generating login URL for {ProviderName}", providerName);
+                return StatusCode(500, "An error occurred while generating login URL");
+            }
+        }
+
+        // GET api/authentication/callback?code=...&state=...
+        // This is where the provider redirects back after user signs in
+        [HttpGet("callback")]
+        public async Task<IActionResult> Callback(
+            [FromQuery] string code,
+            [FromQuery] string state,
+            [FromQuery] string error = null,
+            [FromQuery] string error_description = null)
+        {
+            // Handle provider errors
+            if (!string.IsNullOrEmpty(error))
+            {
+                _logger.LogWarning("Provider returned error: {Error} - {Description}", error, error_description);
+                var errorRedirect = _config["App:UIBaseUrl"] + $"/login?error={HttpUtility.UrlEncode(error_description ?? error)}";
+                return Redirect(errorRedirect);
+            }
+
+            if (string.IsNullOrEmpty(code) || string.IsNullOrEmpty(state))
+                return BadRequest(new { error = "Missing code or state parameter" });
+
+            // Validate state to prevent CSRF
+            var stateEntry = await _stateStore.GetAndRemoveAsync(state);
+            if (stateEntry == null)
+            {
+                _logger.LogWarning("Invalid or expired state parameter: {State}", state);
+                return BadRequest(new { error = "Invalid or expired state. Please try logging in again." });
+            }
+
+            var (providerName, returnUrl) = stateEntry.Value;
+
+            try
+            {
+                var provider = await _ssoProviderService.GetProviderByNameAsync(providerName);
+
+                // Build callback URI (must match what was sent to authorize endpoint)
+                var callbackUri = $"{Request.Scheme}://{Request.Host}/api/authentication/callback";
+
+                // Exchange authorization code for tokens
+                var tokenResponse = await ExchangeCodeForTokensAsync(provider, code, callbackUri);
+
+                if (tokenResponse == null)
+                    return StatusCode(500, new { error = "Token exchange failed" });
+
+                // Parse user information from id_token or userinfo endpoint
+                var userInfo = await GetUserInfoAsync(provider, tokenResponse, providerName);
+
+                // Generate your own app JWT
+                var appJwt = _jwtTokenService.GenerateToken(userInfo);
+
+                // Save user SSO mapping (optional, for audit)
+                await SaveUserSsoMappingAsync(provider.Id, userInfo);
+
+                // Redirect UI with token
+                var uiReturnUrl = _config["App:UIBaseUrl"] + returnUrl;
+                var redirectUrl = $"{uiReturnUrl}?token={HttpUtility.UrlEncode(appJwt)}";
+
+                _logger.LogInformation("User {Email} logged in via {ProviderName}", 
+                    userInfo.Email, providerName);
+
+                return Redirect(redirectUrl);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Callback processing failed for provider {ProviderName}", providerName);
+                var failRedirect = _config["App:UIBaseUrl"] + "/login?error=callback_failed";
+                return Redirect(failRedirect);
+            }
+        }
+
+        // POST api/authentication/logout
+        [HttpPost("logout")]
+        public IActionResult Logout()
+        {
+            // Since we're using stateless JWT, logout is handled on the frontend
+            // by clearing the token. Optionally revoke refresh tokens here.
+            return Ok(new { message = "Logged out successfully" });
+        }
+
+        // ─────────────────── Private Helpers ───────────────────
+
+        private string BuildAuthorizeEndpoint(string authority, string providerType)
+        {
+            var baseUrl = authority.TrimEnd('/');
+
+            return providerType.ToLowerInvariant() switch
+            {
+                // Azure AD, Azure B2C, generic OIDC
+                "openidconnect" or "oidc" => $"{baseUrl}/oauth2/v2.0/authorize",
+                
+                // OAuth2 generic (GitHub, etc.)
+                "oauth2" => IsAzureAuthority(baseUrl)
+                    ? $"{baseUrl}/oauth2/v2.0/authorize"  // Azure AD uses OAuth2 too
+                    : $"{baseUrl}/authorize",
+                
+                _ => $"{baseUrl}/authorize"
+            };
+        }
+
+        private string BuildTokenEndpoint(string authority, string providerType)
+        {
+            var baseUrl = authority.TrimEnd('/');
+
+            return providerType.ToLowerInvariant() switch
+            {
+                "openidconnect" or "oidc" => $"{baseUrl}/oauth2/v2.0/token",
+                "oauth2" => IsAzureAuthority(baseUrl)
+                    ? $"{baseUrl}/oauth2/v2.0/token"
+                    : $"{baseUrl}/token",
+                _ => $"{baseUrl}/token"
+            };
+        }
+
+        private bool IsAzureAuthority(string authority) =>
+            authority.Contains("login.microsoftonline.com") ||
+            authority.Contains(".b2clogin.com");
+
+        private async Task<TokenResponse?> ExchangeCodeForTokensAsync(
+            SSOProviderResponseDto provider,
+            string code,
+            string callbackUri)
+        {
+            var tokenEndpoint = BuildTokenEndpoint(provider.Authority, provider.ProviderType);
+            var decryptedSecret = _encryptionService.Decrypt(
+                await GetProviderClientSecretAsync(provider.Id));
+
+            var formData = new Dictionary<string, string>
+            {
+                ["grant_type"]    = "authorization_code",
+                ["client_id"]     = provider.ClientId,
+                ["client_secret"] = decryptedSecret,
+                ["code"]          = code,
+                ["redirect_uri"]  = callbackUri,
+            };
+
+            var client = _httpClientFactory.CreateClient();
+            var response = await client.PostAsync(
+                tokenEndpoint,
+                new FormUrlEncodedContent(formData));
+
+            if (!response.IsSuccessStatusCode)
+            {
+                var errBody = await response.Content.ReadAsStringAsync();
+                _logger.LogError("Token exchange failed [{Status}]: {Body}", 
+                    response.StatusCode, errBody);
+                return null;
+            }
+
+            var json = await response.Content.ReadAsStringAsync();
+            return JsonSerializer.Deserialize<TokenResponse>(json,
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        }
+
+        private async Task<UserInfo> GetUserInfoAsync(
+            SSOProviderResponseDto provider,
+            TokenResponse tokenResponse,
+            string providerName)
+        {
+            // 1. Try to parse id_token claims first (faster, no extra HTTP call)
+            if (!string.IsNullOrEmpty(tokenResponse.IdToken))
+            {
+                var claims = ParseIdToken(tokenResponse.IdToken);
+                if (claims != null)
+                {
+                    return new UserInfo
+                    {
+                        ExternalUserId = claims.GetValueOrDefault("sub") 
+                                      ?? claims.GetValueOrDefault("oid") 
+                                      ?? Guid.NewGuid().ToString(),
+                        Email          = claims.GetValueOrDefault("email") 
+                                      ?? claims.GetValueOrDefault("upn") ?? "",
+                        Name           = claims.GetValueOrDefault("name") 
+                                      ?? claims.GetValueOrDefault("preferred_username") ?? "",
+                        ProviderName   = providerName
+                    };
+                }
+            }
+
+            // 2. Fallback: call userinfo endpoint
+            var userInfoEndpoint = $"{provider.Authority.TrimEnd('/')}/openid/userinfo";
+            var client = _httpClientFactory.CreateClient();
+            client.DefaultRequestHeaders.Authorization =
+                new AuthenticationHeaderValue("Bearer", tokenResponse.AccessToken);
+
+            var response = await client.GetAsync(userInfoEndpoint);
+            if (response.IsSuccessStatusCode)
+            {
+                var json = await response.Content.ReadAsStringAsync();
+                using var doc = JsonDocument.Parse(json);
+                var root = doc.RootElement;
+
+                return new UserInfo
+                {
+                    ExternalUserId = root.TryGetProperty("sub", out var sub) ? sub.GetString() : Guid.NewGuid().ToString(),
+                    Email          = root.TryGetProperty("email", out var email) ? email.GetString() : "",
+                    Name           = root.TryGetProperty("name", out var name) ? name.GetString() : "",
+                    ProviderName   = providerName
+                };
+            }
+
+            throw new Exception("Could not retrieve user information from provider");
+        }
+
+        private Dictionary<string, string>? ParseIdToken(string idToken)
+        {
+            try
+            {
+                // Decode JWT payload (Base64Url) — no signature validation here,
+                // add Microsoft.IdentityModel.Tokens for full validation in production
+                var parts = idToken.Split('.');
+                if (parts.Length < 2) return null;
+
+                var payload = parts[1];
+                // Pad Base64 string
+                payload = payload.Length % 4 switch
+                {
+                    2 => payload + "==",
+                    3 => payload + "=",
+                    _ => payload
+                };
+
+                var jsonBytes = Convert.FromBase64String(
+                    payload.Replace('-', '+').Replace('_', '/'));
+                var json = Encoding.UTF8.GetString(jsonBytes);
+
+                using var doc = JsonDocument.Parse(json);
+                return doc.RootElement.EnumerateObject()
+                    .ToDictionary(p => p.Name, p => p.Value.ToString());
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private async Task<string> GetProviderClientSecretAsync(Guid providerId)
+        {
+            // Fetch raw encrypted secret from DB (not exposed in DTO)
+            using var scope = HttpContext.RequestServices.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var provider = await db.SSOProviders.FindAsync(providerId);
+            return provider?.ClientSecret ?? throw new Exception("Provider secret not found");
+        }
+
+        private async Task SaveUserSsoMappingAsync(Guid providerId, UserInfo userInfo)
+        {
+            // Optionally record user login in user_sso_mappings table
+            // (upsert pattern — skip if already exists)
+        }
+    }
+
+    // Token response model
+    public class TokenResponse
+    {
+        public string AccessToken { get; set; }
+        public string IdToken { get; set; }
+        public string RefreshToken { get; set; }
+        public string TokenType { get; set; }
+        public int ExpiresIn { get; set; }
+    }
+}
+
+3. Register New Services in Program.cs
+
+csharp
+// Register all new services
+builder.Services.AddSingleton<IStateStore, InMemoryStateStore>();
+builder.Services.AddScoped<IJwtTokenService, JwtTokenService>();
+builder.Services.AddHttpClient(); // IHttpClientFactory
+
+4. Update appsettings.json
+
+json
+{
+  "Jwt": {
+    "SecretKey": "YourSuperSecretKeyAtLeast32CharsLong!",
+    "Issuer": "https://yourapp.com",
+    "Audience": "https://yourapp.com"
+  },
+  "App": {
+    "UIBaseUrl": "http://localhost:3000"
+  }
+}
+
+5. API Flow for Your Provider
+
+With the AzureAD provider data you posted, here is exactly what happens end-to-end:
+
+text
+1. UI calls:
+   GET /api/authentication/login-url/AzureAD?returnUrl=/dashboard
+
+2. API builds and returns:
+   {
+     "authorizeUrl": "https://login.microsoftonline.com/contoso.onmicrosoft.com
+                       /oauth2/v2.0/authorize
+                       ?client_id=a1b2c3d4-5678-90ab-cdef-1234567890ab
+                       &response_type=code
+                       &redirect_uri=https://yourapp.com/api/authentication/callback
+                       &scope=openid profile email User.Read
+                       &state=abc123xyz",
+     "state": "abc123xyz",
+     "providerName": "AzureAD"
+   }
+
+3. UI does: window.location.href = data.authorizeUrl
+
+4. User signs in at Microsoft, redirected to:
+   GET /api/authentication/callback?code=AUTH_CODE&state=abc123xyz
+
+5. API exchanges code for tokens → parses id_token → issues your own JWT
+
+6. API redirects to:
+   http://localhost:3000/dashboard?token=YOUR_APP_JWT
+
+7. UI stores JWT and uses it as: Authorization: Bearer YOUR_APP_JWT
+
+No Challenge, no registered schemes, no ASP.NET auth middleware required for SSO flow — just pure HTTP and standard OAuth 2.0 authorization code flow
