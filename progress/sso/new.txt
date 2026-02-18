@@ -1,1 +1,1828 @@
-new
+text
+MultiSsoManager/
+├── MultiSsoManager.API/
+│   ├── Controllers/
+│   │   ├── SsoProvidersController.cs   ← CRUD for providers
+│   │   └── AuthController.cs           ← OAuth flow endpoints
+│   ├── Data/
+│   │   └── AppDbContext.cs
+│   ├── DTOs/
+│   │   └── SsoProviderDtos.cs
+│   ├── Models/
+│   │   ├── SsoProvider.cs
+│   │   ├── AppUser.cs
+│   │   └── UserSsoLogin.cs
+│   ├── Services/
+│   │   ├── ISsoProviderService.cs + SsoProviderService.cs
+│   │   ├── IDynamicOAuthService.cs + DynamicOAuthService.cs
+│   │   └── IJwtService.cs + JwtService.cs
+│   ├── Program.cs
+│   └── appsettings.json
+└── test.html
+
+NuGet Packages
+
+bash
+dotnet new webapi -n MultiSsoManager.API
+cd MultiSsoManager.API
+
+dotnet add package Npgsql.EntityFrameworkCore.PostgreSQL
+dotnet add package Microsoft.EntityFrameworkCore.Design
+dotnet add package Microsoft.AspNetCore.Authentication.JwtBearer
+dotnet add package System.IdentityModel.Tokens.Jwt
+dotnet add package Swashbuckle.AspNetCore
+
+Models
+Models/SsoProvider.cs
+
+csharp
+using System.ComponentModel.DataAnnotations;
+using System.ComponentModel.DataAnnotations.Schema;
+
+namespace MultiSsoManager.API.Models;
+
+[Table("sso_providers")]
+public class SsoProvider
+{
+    [Key, Column("id")]
+    public Guid Id { get; set; } = Guid.NewGuid();
+
+    [Required, MaxLength(100), Column("name")]
+    public string Name { get; set; } = string.Empty;
+
+    /// <summary>URL-safe unique identifier, e.g. "google", "azure-ad"</summary>
+    [Required, MaxLength(50), Column("slug")]
+    public string Slug { get; set; } = string.Empty;
+
+    /// <summary>oidc or oauth2</summary>
+    [Required, MaxLength(20), Column("provider_type")]
+    public string ProviderType { get; set; } = "oidc";
+
+    [Required, Column("client_id")]
+    public string ClientId { get; set; } = string.Empty;
+
+    [Required, Column("client_secret")]
+    public string ClientSecret { get; set; } = string.Empty;
+
+    /// <summary>OIDC authority, e.g. https://accounts.google.com</summary>
+    [Column("authority")]
+    public string? Authority { get; set; }
+
+    [Column("authorization_endpoint")]
+    public string? AuthorizationEndpoint { get; set; }
+
+    [Column("token_endpoint")]
+    public string? TokenEndpoint { get; set; }
+
+    [Column("user_info_endpoint")]
+    public string? UserInfoEndpoint { get; set; }
+
+    [Column("jwks_uri")]
+    public string? JwksUri { get; set; }
+
+    /// <summary>authorization_code, client_credentials, etc.</summary>
+    [Required, MaxLength(50), Column("grant_type")]
+    public string GrantType { get; set; } = "authorization_code";
+
+    [Column("scopes")]
+    public string Scopes { get; set; } = "openid profile email";
+
+    [Column("response_type")]
+    public string ResponseType { get; set; } = "code";
+
+    [Column("pkce_enabled")]
+    public bool PkceEnabled { get; set; } = true;
+
+    /// <summary>Extra query params as JSON, e.g. {"prompt":"select_account"}</summary>
+    [Column("additional_parameters")]
+    public string? AdditionalParameters { get; set; }
+
+    [Column("is_enabled")]
+    public bool IsEnabled { get; set; } = true;
+
+    [Column("created_at")]
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+
+    [Column("updated_at")]
+    public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
+
+    public ICollection<UserSsoLogin> UserSsoLogins { get; set; } = new List<UserSsoLogin>();
+}
+
+Models/AppUser.cs
+
+csharp
+using System.ComponentModel.DataAnnotations;
+using System.ComponentModel.DataAnnotations.Schema;
+
+namespace MultiSsoManager.API.Models;
+
+[Table("app_users")]
+public class AppUser
+{
+    [Key, Column("id")]
+    public Guid Id { get; set; } = Guid.NewGuid();
+
+    [Required, MaxLength(200), Column("email")]
+    public string Email { get; set; } = string.Empty;
+
+    [MaxLength(200), Column("display_name")]
+    public string? DisplayName { get; set; }
+
+    [MaxLength(500), Column("avatar_url")]
+    public string? AvatarUrl { get; set; }
+
+    [Column("created_at")]
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+
+    [Column("last_login_at")]
+    public DateTime? LastLoginAt { get; set; }
+
+    public ICollection<UserSsoLogin> SsoLogins { get; set; } = new List<UserSsoLogin>();
+}
+
+Models/UserSsoLogin.cs
+
+csharp
+using System.ComponentModel.DataAnnotations;
+using System.ComponentModel.DataAnnotations.Schema;
+
+namespace MultiSsoManager.API.Models;
+
+[Table("user_sso_logins")]
+public class UserSsoLogin
+{
+    [Key, Column("id")]
+    public Guid Id { get; set; } = Guid.NewGuid();
+
+    [Column("user_id")]
+    public Guid UserId { get; set; }
+
+    [Column("provider_id")]
+    public Guid ProviderId { get; set; }
+
+    /// <summary>The "sub" claim from the SSO provider</summary>
+    [Required, MaxLength(500), Column("provider_subject")]
+    public string ProviderSubject { get; set; } = string.Empty;
+
+    [Column("access_token")]
+    public string? AccessToken { get; set; }
+
+    [Column("refresh_token")]
+    public string? RefreshToken { get; set; }
+
+    [Column("token_expires_at")]
+    public DateTime? TokenExpiresAt { get; set; }
+
+    [Column("created_at")]
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+
+    [Column("updated_at")]
+    public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
+
+    public AppUser User { get; set; } = null!;
+    public SsoProvider Provider { get; set; } = null!;
+}
+
+Data Layer
+Data/AppDbContext.cs
+
+csharp
+using Microsoft.EntityFrameworkCore;
+using MultiSsoManager.API.Models;
+
+namespace MultiSsoManager.API.Data;
+
+public class AppDbContext : DbContext
+{
+    public AppDbContext(DbContextOptions<AppDbContext> options) : base(options) { }
+
+    public DbSet<SsoProvider> SsoProviders => Set<SsoProvider>();
+    public DbSet<AppUser> AppUsers => Set<AppUser>();
+    public DbSet<UserSsoLogin> UserSsoLogins => Set<UserSsoLogin>();
+
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        base.OnModelCreating(modelBuilder);
+
+        modelBuilder.Entity<SsoProvider>(e =>
+            e.HasIndex(p => p.Slug).IsUnique());
+
+        modelBuilder.Entity<AppUser>(e =>
+            e.HasIndex(u => u.Email).IsUnique());
+
+        modelBuilder.Entity<UserSsoLogin>(e =>
+        {
+            e.HasIndex(s => new { s.ProviderId, s.ProviderSubject }).IsUnique();
+
+            e.HasOne(s => s.User)
+                .WithMany(u => u.SsoLogins)
+                .HasForeignKey(s => s.UserId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            e.HasOne(s => s.Provider)
+                .WithMany(p => p.UserSsoLogins)
+                .HasForeignKey(s => s.ProviderId)
+                .OnDelete(DeleteBehavior.Restrict);
+        });
+    }
+}
+
+DTOs
+DTOs/SsoProviderDtos.cs
+
+csharp
+using System.ComponentModel.DataAnnotations;
+
+namespace MultiSsoManager.API.DTOs;
+
+// ── Response DTOs ──────────────────────────────────────────────
+
+public record SsoProviderDto(
+    Guid Id, string Name, string Slug, string ProviderType,
+    string ClientId, string? Authority,
+    string? AuthorizationEndpoint, string? TokenEndpoint,
+    string? UserInfoEndpoint, string? JwksUri,
+    string GrantType, string Scopes, string ResponseType,
+    bool PkceEnabled, string? AdditionalParameters,
+    bool IsEnabled, DateTime CreatedAt, DateTime UpdatedAt);
+
+public record SsoProviderPublicDto(Guid Id, string Name, string Slug, string ProviderType);
+
+public record UserInfoDto(Guid Id, string Email, string? DisplayName, string? AvatarUrl);
+
+public record AuthCallbackResult(
+    bool Success,
+    string? JwtToken = null,
+    DateTime? ExpiresAt = null,
+    UserInfoDto? User = null,
+    string? Error = null);
+
+// ── Request DTOs ───────────────────────────────────────────────
+
+public class UpsertSsoProviderRequest
+{
+    [Required, MaxLength(100)]
+    public string Name { get; set; } = string.Empty;
+
+    [Required, MaxLength(50)]
+    public string Slug { get; set; } = string.Empty;
+
+    [Required]
+    public string ProviderType { get; set; } = "oidc";
+
+    [Required]
+    public string ClientId { get; set; } = string.Empty;
+
+    [Required]
+    public string ClientSecret { get; set; } = string.Empty;
+
+    public string? Authority { get; set; }
+    public string? AuthorizationEndpoint { get; set; }
+    public string? TokenEndpoint { get; set; }
+    public string? UserInfoEndpoint { get; set; }
+    public string? JwksUri { get; set; }
+
+    public string GrantType { get; set; } = "authorization_code";
+    public string Scopes { get; set; } = "openid profile email";
+    public string ResponseType { get; set; } = "code";
+    public bool PkceEnabled { get; set; } = true;
+
+    /// <summary>JSON string of extra OAuth params e.g. {"prompt":"select_account"}</summary>
+    public string? AdditionalParameters { get; set; }
+
+    public bool IsEnabled { get; set; } = true;
+}
+
+Services
+Services/ISsoProviderService.cs
+
+csharp
+using MultiSsoManager.API.DTOs;
+using MultiSsoManager.API.Models;
+
+namespace MultiSsoManager.API.Services;
+
+public interface ISsoProviderService
+{
+    Task<IEnumerable<SsoProviderDto>> GetAllAsync();
+    Task<IEnumerable<SsoProviderPublicDto>> GetEnabledPublicAsync();
+    Task<SsoProviderDto?> GetByIdAsync(Guid id);
+    Task<SsoProvider?> GetBySlugInternalAsync(string slug);   // used by auth flow
+    Task<SsoProviderDto> CreateAsync(UpsertSsoProviderRequest req);
+    Task<SsoProviderDto?> UpdateAsync(Guid id, UpsertSsoProviderRequest req);
+    Task<bool> DeleteAsync(Guid id);
+    Task<bool> ToggleAsync(Guid id);
+}
+
+Services/SsoProviderService.cs
+
+csharp
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
+using MultiSsoManager.API.Data;
+using MultiSsoManager.API.DTOs;
+using MultiSsoManager.API.Models;
+
+namespace MultiSsoManager.API.Services;
+
+public class SsoProviderService : ISsoProviderService
+{
+    private readonly AppDbContext _db;
+    private readonly IMemoryCache _cache;
+    private static readonly TimeSpan CacheTtl = TimeSpan.FromMinutes(10);
+
+    public SsoProviderService(AppDbContext db, IMemoryCache cache)
+    {
+        _db = db;
+        _cache = cache;
+    }
+
+    // ── Read ──────────────────────────────────────────────────
+
+    public async Task<IEnumerable<SsoProviderDto>> GetAllAsync() =>
+        (await _db.SsoProviders.OrderBy(p => p.Name).ToListAsync()).Select(ToDto);
+
+    public async Task<IEnumerable<SsoProviderPublicDto>> GetEnabledPublicAsync() =>
+        await _db.SsoProviders
+            .Where(p => p.IsEnabled)
+            .OrderBy(p => p.Name)
+            .Select(p => new SsoProviderPublicDto(p.Id, p.Name, p.Slug, p.ProviderType))
+            .ToListAsync();
+
+    public async Task<SsoProviderDto?> GetByIdAsync(Guid id)
+    {
+        var p = await _db.SsoProviders.FindAsync(id);
+        return p == null ? null : ToDto(p);
+    }
+
+    public async Task<SsoProvider?> GetBySlugInternalAsync(string slug)
+    {
+        var key = $"sso:{slug}";
+        if (_cache.TryGetValue(key, out SsoProvider? cached))
+            return cached;
+
+        var provider = await _db.SsoProviders
+            .FirstOrDefaultAsync(p => p.Slug == slug && p.IsEnabled);
+
+        if (provider != null)
+            _cache.Set(key, provider, CacheTtl);
+
+        return provider;
+    }
+
+    // ── Write ─────────────────────────────────────────────────
+
+    public async Task<SsoProviderDto> CreateAsync(UpsertSsoProviderRequest req)
+    {
+        var provider = Apply(new SsoProvider(), req);
+        _db.SsoProviders.Add(provider);
+        await _db.SaveChangesAsync();
+        return ToDto(provider);
+    }
+
+    public async Task<SsoProviderDto?> UpdateAsync(Guid id, UpsertSsoProviderRequest req)
+    {
+        var provider = await _db.SsoProviders.FindAsync(id);
+        if (provider == null) return null;
+
+        Bust(provider.Slug);
+        Apply(provider, req);
+        provider.UpdatedAt = DateTime.UtcNow;
+        await _db.SaveChangesAsync();
+        return ToDto(provider);
+    }
+
+    public async Task<bool> DeleteAsync(Guid id)
+    {
+        var provider = await _db.SsoProviders.FindAsync(id);
+        if (provider == null) return false;
+        Bust(provider.Slug);
+        _db.SsoProviders.Remove(provider);
+        await _db.SaveChangesAsync();
+        return true;
+    }
+
+    public async Task<bool> ToggleAsync(Guid id)
+    {
+        var provider = await _db.SsoProviders.FindAsync(id);
+        if (provider == null) return false;
+        Bust(provider.Slug);
+        provider.IsEnabled = !provider.IsEnabled;
+        provider.UpdatedAt = DateTime.UtcNow;
+        await _db.SaveChangesAsync();
+        return true;
+    }
+
+    // ── Helpers ───────────────────────────────────────────────
+
+    private void Bust(string slug) => _cache.Remove($"sso:{slug}");
+
+    private static SsoProvider Apply(SsoProvider p, UpsertSsoProviderRequest r)
+    {
+        p.Name = r.Name;
+        p.Slug = r.Slug.ToLowerInvariant().Replace(" ", "-");
+        p.ProviderType = r.ProviderType;
+        p.ClientId = r.ClientId;
+        p.ClientSecret = r.ClientSecret;
+        p.Authority = r.Authority;
+        p.AuthorizationEndpoint = r.AuthorizationEndpoint;
+        p.TokenEndpoint = r.TokenEndpoint;
+        p.UserInfoEndpoint = r.UserInfoEndpoint;
+        p.JwksUri = r.JwksUri;
+        p.GrantType = r.GrantType;
+        p.Scopes = r.Scopes;
+        p.ResponseType = r.ResponseType;
+        p.PkceEnabled = r.PkceEnabled;
+        p.AdditionalParameters = r.AdditionalParameters;
+        p.IsEnabled = r.IsEnabled;
+        return p;
+    }
+
+    private static SsoProviderDto ToDto(SsoProvider p) => new(
+        p.Id, p.Name, p.Slug, p.ProviderType, p.ClientId,
+        p.Authority, p.AuthorizationEndpoint, p.TokenEndpoint,
+        p.UserInfoEndpoint, p.JwksUri, p.GrantType, p.Scopes,
+        p.ResponseType, p.PkceEnabled, p.AdditionalParameters,
+        p.IsEnabled, p.CreatedAt, p.UpdatedAt);
+}
+
+Services/IDynamicOAuthService.cs
+
+csharp
+using MultiSsoManager.API.DTOs;
+
+namespace MultiSsoManager.API.Services;
+
+public interface IDynamicOAuthService
+{
+    Task<string> BuildAuthorizationUrlAsync(
+        string slug, string callbackUrl, string state, string? codeVerifier = null);
+
+    Task<AuthCallbackResult> HandleCallbackAsync(
+        string slug, string code, string callbackUrl, string? codeVerifier = null);
+}
+
+Services/DynamicOAuthService.cs
+
+csharp
+using System.IdentityModel.Tokens.Jwt;
+using System.Net.Http.Headers;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using Microsoft.EntityFrameworkCore;
+using MultiSsoManager.API.Data;
+using MultiSsoManager.API.DTOs;
+using MultiSsoManager.API.Models;
+
+namespace MultiSsoManager.API.Services;
+
+public class DynamicOAuthService : IDynamicOAuthService
+{
+    private readonly ISsoProviderService _providers;
+    private readonly AppDbContext _db;
+    private readonly IHttpClientFactory _http;
+    private readonly IJwtService _jwt;
+    private readonly ILogger<DynamicOAuthService> _log;
+
+    public DynamicOAuthService(
+        ISsoProviderService providers, AppDbContext db,
+        IHttpClientFactory http, IJwtService jwt,
+        ILogger<DynamicOAuthService> log)
+    {
+        _providers = providers; _db = db;
+        _http = http; _jwt = jwt; _log = log;
+    }
+
+    // ── Step 1: Build redirect URL ────────────────────────────
+
+    public async Task<string> BuildAuthorizationUrlAsync(
+        string slug, string callbackUrl, string state, string? codeVerifier = null)
+    {
+        var provider = await _providers.GetBySlugInternalAsync(slug)
+            ?? throw new InvalidOperationException($"Provider '{slug}' not found or disabled.");
+
+        var authEndpoint = provider.AuthorizationEndpoint
+            ?? await DiscoverAsync(provider.Authority!, "authorization_endpoint");
+
+        var q = new Dictionary<string, string>
+        {
+            ["client_id"]     = provider.ClientId,
+            ["response_type"] = provider.ResponseType,
+            ["redirect_uri"]  = callbackUrl,
+            ["scope"]         = provider.Scopes,
+            ["state"]         = state
+        };
+
+        if (provider.PkceEnabled && codeVerifier != null)
+        {
+            q["code_challenge"]        = ComputeS256(codeVerifier);
+            q["code_challenge_method"] = "S256";
+        }
+
+        if (!string.IsNullOrEmpty(provider.AdditionalParameters))
+        {
+            var extras = JsonSerializer.Deserialize<Dictionary<string, string>>(
+                provider.AdditionalParameters, JsonOpts);
+            if (extras != null)
+                foreach (var kv in extras) q[kv.Key] = kv.Value;
+        }
+
+        return authEndpoint + "?" + string.Join("&",
+            q.Select(kv => $"{Uri.EscapeDataString(kv.Key)}={Uri.EscapeDataString(kv.Value)}"));
+    }
+
+    // ── Step 2: Handle callback ───────────────────────────────
+
+    public async Task<AuthCallbackResult> HandleCallbackAsync(
+        string slug, string code, string callbackUrl, string? codeVerifier = null)
+    {
+        try
+        {
+            var provider = await _providers.GetBySlugInternalAsync(slug)
+                ?? throw new InvalidOperationException($"Provider '{slug}' not found.");
+
+            var tokens = await ExchangeCodeAsync(provider, code, callbackUrl, codeVerifier);
+            if (tokens is null)
+                return new AuthCallbackResult(false, Error: "Token exchange failed.");
+
+            var claims = await GetClaimsAsync(provider, tokens);
+            if (claims is null)
+                return new AuthCallbackResult(false, Error: "Failed to retrieve user info.");
+
+            var user = await UpsertUserAsync(provider, claims, tokens);
+            var (jwtToken, expiresAt) = _jwt.GenerateToken(user);
+
+            return new AuthCallbackResult(true, jwtToken, expiresAt,
+                new UserInfoDto(user.Id, user.Email, user.DisplayName, user.AvatarUrl));
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "OAuth callback error for {Slug}", slug);
+            return new AuthCallbackResult(false, Error: ex.Message);
+        }
+    }
+
+    // ── Token Exchange ────────────────────────────────────────
+
+    private async Task<TokenResponse?> ExchangeCodeAsync(
+        SsoProvider provider, string code, string callbackUrl, string? codeVerifier)
+    {
+        var endpoint = provider.TokenEndpoint
+            ?? await DiscoverAsync(provider.Authority!, "token_endpoint");
+
+        var form = new Dictionary<string, string>
+        {
+            ["grant_type"]   = provider.GrantType,
+            ["code"]         = code,
+            ["redirect_uri"] = callbackUrl,
+            ["client_id"]    = provider.ClientId,
+            ["client_secret"] = provider.ClientSecret
+        };
+
+        if (provider.PkceEnabled && codeVerifier != null)
+            form["code_verifier"] = codeVerifier;
+
+        var client = _http.CreateClient();
+        var resp = await client.PostAsync(endpoint, new FormUrlEncodedContent(form));
+
+        if (!resp.IsSuccessStatusCode)
+        {
+            _log.LogError("Token exchange failed: {Body}", await resp.Content.ReadAsStringAsync());
+            return null;
+        }
+
+        return JsonSerializer.Deserialize<TokenResponse>(
+            await resp.Content.ReadAsStringAsync(), JsonOpts);
+    }
+
+    // ── User Claims ───────────────────────────────────────────
+
+    private async Task<Dictionary<string, JsonElement>?> GetClaimsAsync(
+        SsoProvider provider, TokenResponse tokens)
+    {
+        // Prefer id_token (no extra HTTP round-trip)
+        if (!string.IsNullOrEmpty(tokens.IdToken))
+        {
+            var handler = new JwtSecurityTokenHandler();
+            if (handler.CanReadToken(tokens.IdToken))
+            {
+                var jwtSec = handler.ReadJwtToken(tokens.IdToken);
+                return jwtSec.Claims
+                    .GroupBy(c => c.Type)
+                    .ToDictionary(g => g.Key,
+                        g => JsonSerializer.SerializeToElement(g.First().Value));
+            }
+        }
+
+        // Fallback: call userinfo endpoint
+        var endpoint = provider.UserInfoEndpoint
+            ?? await DiscoverAsync(provider.Authority!, "userinfo_endpoint");
+
+        var client = _http.CreateClient();
+        client.DefaultRequestHeaders.Authorization =
+            new AuthenticationHeaderValue("Bearer", tokens.AccessToken);
+
+        var resp = await client.GetAsync(endpoint);
+        if (!resp.IsSuccessStatusCode) return null;
+
+        return JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(
+            await resp.Content.ReadAsStringAsync(), JsonOpts);
+    }
+
+    // ── Upsert User ───────────────────────────────────────────
+
+    private async Task<AppUser> UpsertUserAsync(
+        SsoProvider provider, Dictionary<string, JsonElement> claims, TokenResponse tokens)
+    {
+        var sub    = Claim(claims, "sub") ?? Claim(claims, "id")
+                     ?? throw new InvalidOperationException("No subject claim.");
+        var email  = Claim(claims, "email") ?? sub;
+        var name   = Claim(claims, "name")
+                     ?? $"{Claim(claims, "given_name")} {Claim(claims, "family_name")}".Trim();
+        var avatar = Claim(claims, "picture");
+
+        var user = await _db.AppUsers.FirstOrDefaultAsync(u => u.Email == email);
+        if (user is null)
+        {
+            user = new AppUser { Email = email, DisplayName = name, AvatarUrl = avatar };
+            _db.AppUsers.Add(user);
+            await _db.SaveChangesAsync(); // get the Id
+        }
+        else
+        {
+            user.DisplayName = name;
+            user.AvatarUrl   = avatar;
+        }
+        user.LastLoginAt = DateTime.UtcNow;
+
+        var ssoLogin = await _db.UserSsoLogins
+            .FirstOrDefaultAsync(s => s.ProviderId == provider.Id && s.ProviderSubject == sub);
+
+        if (ssoLogin is null)
+        {
+            ssoLogin = new UserSsoLogin
+                { UserId = user.Id, ProviderId = provider.Id, ProviderSubject = sub };
+            _db.UserSsoLogins.Add(ssoLogin);
+        }
+
+        ssoLogin.AccessToken    = tokens.AccessToken;
+        ssoLogin.RefreshToken   = tokens.RefreshToken;
+        ssoLogin.TokenExpiresAt = tokens.ExpiresIn > 0
+            ? DateTime.UtcNow.AddSeconds(tokens.ExpiresIn) : null;
+        ssoLogin.UpdatedAt = DateTime.UtcNow;
+
+        await _db.SaveChangesAsync();
+        return user;
+    }
+
+    // ── OIDC Discovery ────────────────────────────────────────
+
+    private async Task<string> DiscoverAsync(string authority, string key)
+    {
+        var url = $"{authority.TrimEnd('/')}/.well-known/openid-configuration";
+        var json = await _http.CreateClient().GetStringAsync(url);
+        var doc  = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(json, JsonOpts)!;
+        return doc[key].GetString()!;
+    }
+
+    // ── Utils ─────────────────────────────────────────────────
+
+    private static string ComputeS256(string verifier)
+    {
+        var hash = SHA256.HashData(Encoding.ASCII.GetBytes(verifier));
+        return Convert.ToBase64String(hash).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+    }
+
+    private static string? Claim(Dictionary<string, JsonElement> c, string key) =>
+        c.TryGetValue(key, out var el)
+            ? el.ValueKind == JsonValueKind.String ? el.GetString() : el.ToString()
+            : null;
+
+    private static readonly JsonSerializerOptions JsonOpts =
+        new() { PropertyNameCaseInsensitive = true };
+}
+
+public class TokenResponse
+{
+    public string AccessToken  { get; set; } = string.Empty;
+    public string? IdToken     { get; set; }
+    public string? RefreshToken { get; set; }
+    public int ExpiresIn       { get; set; }
+    public string? TokenType   { get; set; }
+}
+
+Services/IJwtService.cs + JwtService.cs
+
+csharp
+using MultiSsoManager.API.Models;
+
+namespace MultiSsoManager.API.Services;
+
+public interface IJwtService
+{
+    (string token, DateTime expiresAt) GenerateToken(AppUser user);
+}
+
+csharp
+using System.IdentityModel.Tokens.Jwt;
+using System.Security.Claims;
+using System.Text;
+using Microsoft.IdentityModel.Tokens;
+using MultiSsoManager.API.Models;
+
+namespace MultiSsoManager.API.Services;
+
+public class JwtService : IJwtService
+{
+    private readonly IConfiguration _config;
+    public JwtService(IConfiguration config) => _config = config;
+
+    public (string token, DateTime expiresAt) GenerateToken(AppUser user)
+    {
+        var key    = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_config["Jwt:Secret"]!));
+        var creds  = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
+        var expiry = DateTime.UtcNow.AddHours(8);
+
+        var claims = new[]
+        {
+            new Claim(JwtRegisteredClaimNames.Sub,   user.Id.ToString()),
+            new Claim(JwtRegisteredClaimNames.Email, user.Email),
+            new Claim(JwtRegisteredClaimNames.Name,  user.DisplayName ?? user.Email),
+            new Claim(JwtRegisteredClaimNames.Jti,   Guid.NewGuid().ToString())
+        };
+
+        var token = new JwtSecurityToken(
+            issuer:            _config["Jwt:Issuer"],
+            audience:          _config["Jwt:Audience"],
+            claims:            claims,
+            expires:           expiry,
+            signingCredentials: creds);
+
+        return (new JwtSecurityTokenHandler().WriteToken(token), expiry);
+    }
+}
+
+Controllers
+Controllers/SsoProvidersController.cs
+
+csharp
+using Microsoft.AspNetCore.Mvc;
+using MultiSsoManager.API.DTOs;
+using MultiSsoManager.API.Services;
+
+namespace MultiSsoManager.API.Controllers;
+
+[ApiController]
+[Route("api/sso-providers")]
+[Produces("application/json")]
+public class SsoProvidersController : ControllerBase
+{
+    private readonly ISsoProviderService _svc;
+    public SsoProvidersController(ISsoProviderService svc) => _svc = svc;
+
+    /// <summary>List all providers (admin use)</summary>
+    [HttpGet]
+    public async Task<IActionResult> GetAll() =>
+        Ok(await _svc.GetAllAsync());
+
+    /// <summary>List enabled providers for the login UI (no secrets exposed)</summary>
+    [HttpGet("public")]
+    public async Task<IActionResult> GetPublic() =>
+        Ok(await _svc.GetEnabledPublicAsync());
+
+    /// <summary>Get single provider by ID</summary>
+    [HttpGet("{id:guid}")]
+    public async Task<IActionResult> GetById(Guid id)
+    {
+        var p = await _svc.GetByIdAsync(id);
+        return p is null ? NotFound() : Ok(p);
+    }
+
+    /// <summary>Create a new SSO provider</summary>
+    [HttpPost]
+    public async Task<IActionResult> Create([FromBody] UpsertSsoProviderRequest req)
+    {
+        if (!ModelState.IsValid) return BadRequest(ModelState);
+        var created = await _svc.CreateAsync(req);
+        return CreatedAtAction(nameof(GetById), new { id = created.Id }, created);
+    }
+
+    /// <summary>Update an existing SSO provider</summary>
+    [HttpPut("{id:guid}")]
+    public async Task<IActionResult> Update(Guid id, [FromBody] UpsertSsoProviderRequest req)
+    {
+        if (!ModelState.IsValid) return BadRequest(ModelState);
+        var updated = await _svc.UpdateAsync(id, req);
+        return updated is null ? NotFound() : Ok(updated);
+    }
+
+    /// <summary>Delete a provider</summary>
+    [HttpDelete("{id:guid}")]
+    public async Task<IActionResult> Delete(Guid id) =>
+        await _svc.DeleteAsync(id) ? NoContent() : NotFound();
+
+    /// <summary>Toggle enabled / disabled</summary>
+    [HttpPatch("{id:guid}/toggle")]
+    public async Task<IActionResult> Toggle(Guid id) =>
+        await _svc.ToggleAsync(id)
+            ? Ok(new { message = "Provider toggled." })
+            : NotFound();
+}
+
+Controllers/AuthController.cs
+
+csharp
+using System.Security.Cryptography;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+using MultiSsoManager.API.Services;
+
+namespace MultiSsoManager.API.Controllers;
+
+[ApiController]
+[Route("api/auth")]
+public class AuthController : ControllerBase
+{
+    private readonly IDynamicOAuthService _oauth;
+    private readonly IConfiguration _config;
+
+    public AuthController(IDynamicOAuthService oauth, IConfiguration config)
+    {
+        _oauth = oauth; _config = config;
+    }
+
+    /// <summary>
+    /// Initiate login for a provider. Returns JSON with authorizationUrl
+    /// (let the frontend do the redirect) OR pass ?redirect=true to get a 302.
+    /// </summary>
+    [HttpGet("login/{slug}")]
+    public async Task<IActionResult> Login(
+        string slug,
+        [FromQuery] string? frontendCallbackUri = null,
+        [FromQuery] bool redirect = false)
+    {
+        var state        = RandomUrlSafe(32);
+        var codeVerifier = RandomUrlSafe(32);
+        var callbackUrl  = $"{Request.Scheme}://{Request.Host}/api/auth/callback/{slug}";
+
+        // Short-lived HttpOnly cookies to carry state across the redirect
+        SetCookie($"oauth_state_{slug}", state);
+        SetCookie($"oauth_cv_{slug}", codeVerifier);
+        SetCookie($"oauth_fe_{slug}",
+            frontendCallbackUri ?? _config["OAuth:DefaultFrontendUri"]!);
+
+        var authUrl = await _oauth.BuildAuthorizationUrlAsync(
+            slug, callbackUrl, state, codeVerifier);
+
+        return redirect
+            ? Redirect(authUrl)
+            : Ok(new { authorizationUrl = authUrl, state });
+    }
+
+    /// <summary>OAuth 2.0 / OIDC callback — provider redirects here after auth</summary>
+    [HttpGet("callback/{slug}")]
+    public async Task<IActionResult> Callback(
+        string slug,
+        [FromQuery] string? code,
+        [FromQuery] string? state,
+        [FromQuery] string? error,
+        [FromQuery(Name = "error_description")] string? errorDescription)
+    {
+        if (!string.IsNullOrEmpty(error))
+            return BadRequest(new { error, errorDescription });
+
+        if (string.IsNullOrEmpty(code) || string.IsNullOrEmpty(state))
+            return BadRequest(new { error = "missing_params" });
+
+        var storedState = Request.Cookies[$"oauth_state_{slug}"];
+        if (storedState != state)
+            return BadRequest(new { error = "state_mismatch" });
+
+        var codeVerifier   = Request.Cookies[$"oauth_cv_{slug}"];
+        var frontendUri    = Request.Cookies[$"oauth_fe_{slug}"]
+                             ?? _config["OAuth:DefaultFrontendUri"]!;
+        var callbackUrl    = $"{Request.Scheme}://{Request.Host}/api/auth/callback/{slug}";
+
+        DeleteCookie($"oauth_state_{slug}");
+        DeleteCookie($"oauth_cv_{slug}");
+        DeleteCookie($"oauth_fe_{slug}");
+
+        var result = await _oauth.HandleCallbackAsync(slug, code, callbackUrl, codeVerifier);
+
+        if (!result.Success)
+            return StatusCode(500, result);
+
+        // Redirect to frontend with token in query string
+        // (in production, prefer a secure fragment or short-lived code exchange)
+        var dest = $"{frontendUri}?token={result.JwtToken}&userId={result.User!.Id}";
+        return Redirect(dest);
+    }
+
+    /// <summary>Returns the current user's JWT claims (requires Bearer token)</summary>
+    [HttpGet("me")]
+    [Authorize]
+    public IActionResult Me() =>
+        Ok(User.Claims.Select(c => new { c.Type, c.Value }));
+
+    // ── Helpers ───────────────────────────────────────────────
+
+    private void SetCookie(string key, string value) =>
+        Response.Cookies.Append(key, value, new CookieOptions
+        {
+            HttpOnly = true,
+            Secure   = Request.IsHttps,
+            SameSite = SameSiteMode.Lax,
+            Expires  = DateTimeOffset.UtcNow.AddMinutes(10)
+        });
+
+    private void DeleteCookie(string key) =>
+        Response.Cookies.Delete(key);
+
+    private static string RandomUrlSafe(int bytes) =>
+        Convert.ToBase64String(RandomNumberGenerator.GetBytes(bytes))
+            .TrimEnd('=').Replace('+', '-').Replace('/', '_');
+}
+
+Program.cs
+
+csharp
+using System.Text;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.IdentityModel.Tokens;
+using Microsoft.OpenApi.Models;
+using MultiSsoManager.API.Data;
+using MultiSsoManager.API.Services;
+
+var builder = WebApplication.CreateBuilder(args);
+
+// ── PostgreSQL ─────────────────────────────────────────────────
+builder.Services.AddDbContext<AppDbContext>(opt =>
+    opt.UseNpgsql(builder.Configuration.GetConnectionString("DefaultConnection")));
+
+// ── Infrastructure ─────────────────────────────────────────────
+builder.Services.AddMemoryCache();
+builder.Services.AddHttpClient();
+
+// ── App Services ───────────────────────────────────────────────
+builder.Services.AddScoped<ISsoProviderService, SsoProviderService>();
+builder.Services.AddScoped<IDynamicOAuthService, DynamicOAuthService>();
+builder.Services.AddScoped<IJwtService, JwtService>();
+
+// ── JWT Auth (for tokens we issue) ─────────────────────────────
+builder.Services
+    .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(opt =>
+    {
+        opt.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidateIssuerSigningKey = true,
+            IssuerSigningKey = new SymmetricSecurityKey(
+                Encoding.UTF8.GetBytes(builder.Configuration["Jwt:Secret"]!)),
+            ValidateIssuer   = true,
+            ValidIssuer      = builder.Configuration["Jwt:Issuer"],
+            ValidateAudience = true,
+            ValidAudience    = builder.Configuration["Jwt:Audience"],
+            ValidateLifetime = true
+        };
+    });
+
+// ── CORS ───────────────────────────────────────────────────────
+builder.Services.AddCors(opt =>
+    opt.AddPolicy("AllowAll", p =>
+        p.AllowAnyOrigin().AllowAnyMethod().AllowAnyHeader()));
+
+// ── Swagger ────────────────────────────────────────────────────
+builder.Services.AddControllers();
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen(c =>
+{
+    c.SwaggerDoc("v1", new OpenApiInfo
+    {
+        Title   = "Multi-SSO Manager API",
+        Version = "v1",
+        Description = "Dynamically manages multiple OAuth2/OIDC SSO providers"
+    });
+    c.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
+    {
+        Name        = "Authorization",
+        Type        = SecuritySchemeType.Http,
+        Scheme      = "Bearer",
+        BearerFormat = "JWT",
+        In          = ParameterLocation.Header
+    });
+    c.AddSecurityRequirement(new OpenApiSecurityRequirement
+    {{
+        new OpenApiSecurityScheme
+        {
+            Reference = new OpenApiReference
+                { Type = ReferenceType.SecurityScheme, Id = "Bearer" }
+        },
+        Array.Empty<string>()
+    }});
+});
+
+// ─────────────────────────────────────────────────────────────────
+
+var app = builder.Build();
+
+// Auto-run migrations
+using (var scope = app.Services.CreateScope())
+    scope.ServiceProvider.GetRequiredService<AppDbContext>().Database.Migrate();
+
+if (app.Environment.IsDevelopment())
+{
+    app.UseSwagger();
+    app.UseSwaggerUI(c => c.SwaggerEndpoint("/swagger/v1/swagger.json", "Multi-SSO v1"));
+}
+
+app.UseCors("AllowAll");
+app.UseHttpsRedirection();
+app.UseAuthentication();
+app.UseAuthorization();
+app.MapControllers();
+app.Run();
+
+appsettings.json
+
+json
+{
+  "ConnectionStrings": {
+    "DefaultConnection": "Host=localhost;Port=5432;Database=multisso_db;Username=postgres;Password=your_password"
+  },
+  "Jwt": {
+    "Secret": "REPLACE_WITH_32+_CHAR_RANDOM_SECRET_KEY_HERE",
+    "Issuer": "MultiSsoManager",
+    "Audience": "MultiSsoManagerClients"
+  },
+  "OAuth": {
+    "DefaultFrontendUri": "http://localhost:5500/test.html"
+  },
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft.AspNetCore": "Warning"
+    }
+  },
+  "AllowedHosts": "*"
+}
+
+test.html
+
+xml
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Multi-SSO Manager — Test Console</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Segoe UI', system-ui, sans-serif; background: #0f172a; color: #e2e8f0; min-height: 100vh; }
+
+    header { background: #1e293b; padding: 1rem 2rem; display: flex; align-items: center; gap: 1rem;
+             border-bottom: 1px solid #334155; }
+    header h1 { font-size: 1.3rem; font-weight: 700; color: #38bdf8; }
+    header span { font-size: .85rem; color: #64748b; }
+
+    .layout { display: grid; grid-template-columns: 240px 1fr; min-height: calc(100vh - 60px); }
+
+    nav { background: #1e293b; border-right: 1px solid #334155; padding: 1.5rem 0; }
+    nav a { display: block; padding: .6rem 1.5rem; color: #94a3b8; text-decoration: none;
+            font-size: .9rem; transition: all .15s; cursor: pointer; }
+    nav a:hover, nav a.active { background: #0f172a; color: #38bdf8; border-right: 3px solid #38bdf8; }
+    nav .section-title { font-size: .7rem; font-weight: 700; text-transform: uppercase;
+                         color: #475569; padding: .5rem 1.5rem .3rem; letter-spacing: .08em; }
+
+    main { padding: 2rem; overflow-y: auto; }
+    .panel { display: none; }
+    .panel.active { display: block; }
+
+    h2 { font-size: 1.1rem; font-weight: 600; color: #f1f5f9; margin-bottom: 1.5rem; }
+
+    .card { background: #1e293b; border: 1px solid #334155; border-radius: 10px;
+            padding: 1.5rem; margin-bottom: 1.5rem; }
+    .card h3 { font-size: .95rem; font-weight: 600; color: #38bdf8; margin-bottom: 1rem; }
+
+    label { display: block; font-size: .8rem; color: #94a3b8; margin-bottom: .3rem; }
+    input, select, textarea {
+      width: 100%; background: #0f172a; border: 1px solid #334155; border-radius: 6px;
+      color: #e2e8f0; padding: .5rem .75rem; font-size: .85rem; margin-bottom: .75rem;
+    }
+    input:focus, select:focus, textarea:focus { outline: none; border-color: #38bdf8; }
+    textarea { resize: vertical; min-height: 80px; font-family: monospace; }
+
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+    .row3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 1rem; }
+
+    button {
+      background: #0ea5e9; color: #fff; border: none; border-radius: 6px;
+      padding: .5rem 1.25rem; font-size: .85rem; font-weight: 600; cursor: pointer;
+      transition: background .15s; margin-right: .5rem;
+    }
+    button:hover { background: #0284c7; }
+    button.danger { background: #ef4444; }
+    button.danger:hover { background: #dc2626; }
+    button.secondary { background: #475569; }
+    button.secondary:hover { background: #334155; }
+    button.success { background: #22c55e; }
+    button.success:hover { background: #16a34a; }
+
+    .response-box {
+      background: #0f172a; border: 1px solid #334155; border-radius: 6px;
+      padding: 1rem; font-family: monospace; font-size: .8rem; color: #a3e635;
+      max-height: 300px; overflow-y: auto; white-space: pre-wrap; word-break: break-all;
+      margin-top: 1rem;
+    }
+    .response-box.error { color: #f87171; }
+
+    .provider-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1rem; }
+    .provider-card {
+      background: #0f172a; border: 1px solid #334155; border-radius: 8px; padding: 1rem;
+    }
+    .provider-card h4 { color: #f1f5f9; font-size: .9rem; margin-bottom: .25rem; }
+    .provider-card .slug { font-size: .75rem; color: #64748b; font-family: monospace; margin-bottom: .75rem; }
+    .badge {
+      display: inline-block; font-size: .7rem; font-weight: 600; padding: .15rem .5rem;
+      border-radius: 999px; margin-right: .3rem;
+    }
+    .badge.enabled  { background: #14532d; color: #86efac; }
+    .badge.disabled { background: #450a0a; color: #fca5a5; }
+    .badge.type     { background: #1e3a5f; color: #93c5fd; }
+
+    .login-buttons { display: flex; flex-wrap: wrap; gap: .75rem; margin-top: 1rem; }
+    .login-btn {
+      background: #1e293b; border: 1px solid #334155; border-radius: 8px;
+      padding: .75rem 1.25rem; color: #e2e8f0; cursor: pointer;
+      font-size: .85rem; font-weight: 600; transition: all .15s;
+    }
+    .login-btn:hover { border-color: #38bdf8; color: #38bdf8; }
+
+    .token-display { background: #0f172a; border: 1px solid #22c55e; border-radius: 6px;
+                     padding: 1rem; font-family: monospace; font-size: .75rem; color: #86efac;
+                     word-break: break-all; margin-top: .75rem; }
+
+    .status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: .4rem; }
+    .status-dot.ok  { background: #22c55e; }
+    .status-dot.err { background: #ef4444; }
+
+    .api-base-row { display: flex; gap: .5rem; align-items: center; margin-bottom: 1.5rem; }
+    .api-base-row input { margin: 0; flex: 1; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>🔐 Multi-SSO Manager</h1>
+  <span>Test Console — ASP.NET Core API</span>
+</header>
+
+<div class="layout">
+  <nav>
+    <div class="section-title">Configuration</div>
+    <a onclick="show('panel-config')" class="active">⚙️ API Settings</a>
+
+    <div class="section-title">Providers</div>
+    <a onclick="show('panel-list')">📋 List Providers</a>
+    <a onclick="show('panel-create')">➕ Create Provider</a>
+    <a onclick="show('panel-update')">✏️ Update Provider</a>
+    <a onclick="show('panel-delete')">🗑️ Delete / Toggle</a>
+
+    <div class="section-title">Authentication</div>
+    <a onclick="show('panel-login')">🔑 Login via SSO</a>
+    <a onclick="show('panel-me')">👤 Verify Token</a>
+  </nav>
+
+  <main>
+
+    <!-- CONFIG -->
+    <div id="panel-config" class="panel active">
+      <h2>⚙️ API Settings</h2>
+      <div class="card">
+        <h3>Base URL</h3>
+        <label>API Base URL</label>
+        <input id="apiBase" type="text" value="http://localhost:5000" />
+        <label>JWT Token (after login)</label>
+        <input id="jwtToken" type="text" placeholder="Paste your JWT here after login" />
+        <button onclick="saveConfig()">💾 Save</button>
+        <button class="secondary" onclick="testConnection()">🔌 Test Connection</button>
+        <div id="config-resp" class="response-box" style="display:none"></div>
+      </div>
+
+      <div class="card">
+        <h3>📖 Quick Reference</h3>
+        <table style="width:100%;border-collapse:collapse;font-size:.8rem">
+          <thead>
+            <tr style="color:#64748b">
+              <th style="text-align:left;padding:.4rem">Method</th>
+              <th style="text-align:left;padding:.4rem">Endpoint</th>
+              <th style="text-align:left;padding:.4rem">Description</th>
+            </tr>
+          </thead>
+          <tbody id="api-ref"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- LIST -->
+    <div id="panel-list" class="panel">
+      <h2>📋 SSO Providers</h2>
+      <div class="card">
+        <button onclick="loadProviders(false)">🔄 Load All (Admin)</button>
+        <button class="secondary" onclick="loadProviders(true)">🌐 Load Public Only</button>
+        <div id="providers-grid" class="provider-grid" style="margin-top:1rem"></div>
+        <div id="list-resp" class="response-box" style="display:none"></div>
+      </div>
+    </div>
+
+    <!-- CREATE -->
+    <div id="panel-create" class="panel">
+      <h2>➕ Create SSO Provider</h2>
+      <div class="card">
+        <h3>Provider Identity</h3>
+        <div class="row">
+          <div>
+            <label>Display Name *</label>
+            <input id="c-name" placeholder="Google Workspace" />
+          </div>
+          <div>
+            <label>Slug * (URL-safe, unique)</label>
+            <input id="c-slug" placeholder="google-workspace" />
+          </div>
+        </div>
+        <div class="row">
+          <div>
+            <label>Provider Type</label>
+            <select id="c-type">
+              <option value="oidc">OpenID Connect (OIDC)</option>
+              <option value="oauth2">OAuth 2.0</option>
+            </select>
+          </div>
+          <div>
+            <label>Grant Type</label>
+            <select id="c-grant">
+              <option value="authorization_code">Authorization Code</option>
+              <option value="client_credentials">Client Credentials</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Credentials</h3>
+        <div class="row">
+          <div>
+            <label>Client ID *</label>
+            <input id="c-clientid" placeholder="your-client-id" />
+          </div>
+          <div>
+            <label>Client Secret *</label>
+            <input id="c-secret" type="password" placeholder="your-client-secret" />
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Endpoints</h3>
+        <label>Authority URL (OIDC — auto-discovers endpoints)</label>
+        <input id="c-authority" placeholder="https://accounts.google.com" />
+        <div class="row">
+          <div>
+            <label>Authorization Endpoint (manual override)</label>
+            <input id="c-authep" placeholder="https://..." />
+          </div>
+          <div>
+            <label>Token Endpoint (manual override)</label>
+            <input id="c-tokenep" placeholder="https://..." />
+          </div>
+        </div>
+        <div class="row">
+          <div>
+            <label>UserInfo Endpoint (manual override)</label>
+            <input id="c-userinfep" placeholder="https://..." />
+          </div>
+          <div>
+            <label>JWKS URI</label>
+            <input id="c-jwks" placeholder="https://..." />
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>OAuth Parameters</h3>
+        <div class="row3">
+          <div>
+            <label>Scopes</label>
+            <input id="c-scopes" value="openid profile email" />
+          </div>
+          <div>
+            <label>Response Type</label>
+            <input id="c-resptype" value="code" />
+          </div>
+          <div>
+            <label>PKCE</label>
+            <select id="c-pkce">
+              <option value="true">Enabled (recommended)</option>
+              <option value="false">Disabled</option>
+            </select>
+          </div>
+        </div>
+        <label>Additional Parameters (JSON, optional)</label>
+        <textarea id="c-extra" placeholder='{"prompt": "select_account", "hd": "example.com"}'></textarea>
+        <label>
+          <input type="checkbox" id="c-enabled" checked style="width:auto;margin-bottom:0" />
+          &nbsp;Enabled
+        </label>
+      </div>
+
+      <button class="success" onclick="createProvider()">✅ Create Provider</button>
+      <button class="secondary" onclick="prefillGoogle()">📌 Prefill Google</button>
+      <button class="secondary" onclick="prefillAzure()">📌 Prefill Azure AD</button>
+      <div id="create-resp" class="response-box" style="display:none"></div>
+    </div>
+
+    <!-- UPDATE -->
+    <div id="panel-update" class="panel">
+      <h2>✏️ Update Provider</h2>
+      <div class="card">
+        <label>Provider ID (GUID)</label>
+        <div style="display:flex;gap:.5rem">
+          <input id="u-id" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" style="margin:0;flex:1" />
+          <button onclick="loadForEdit()">Load</button>
+        </div>
+      </div>
+      <div id="update-form" style="display:none">
+        <div class="card">
+          <div class="row">
+            <div><label>Name</label><input id="u-name" /></div>
+            <div><label>Slug</label><input id="u-slug" /></div>
+          </div>
+          <div class="row">
+            <div><label>Type</label>
+              <select id="u-type">
+                <option value="oidc">OIDC</option>
+                <option value="oauth2">OAuth2</option>
+              </select>
+            </div>
+            <div><label>Grant Type</label>
+              <select id="u-grant">
+                <option value="authorization_code">Authorization Code</option>
+                <option value="client_credentials">Client Credentials</option>
+              </select>
+            </div>
+          </div>
+          <div class="row">
+            <div><label>Client ID</label><input id="u-clientid" /></div>
+            <div><label>Client Secret</label><input id="u-secret" type="password" /></div>
+          </div>
+          <label>Authority</label><input id="u-authority" />
+          <div class="row">
+            <div><label>Auth Endpoint</label><input id="u-authep" /></div>
+            <div><label>Token Endpoint</label><input id="u-tokenep" /></div>
+          </div>
+          <div class="row">
+            <div><label>UserInfo Endpoint</label><input id="u-userinfep" /></div>
+            <div><label>JWKS URI</label><input id="u-jwks" /></div>
+          </div>
+          <div class="row3">
+            <div><label>Scopes</label><input id="u-scopes" /></div>
+            <div><label>Response Type</label><input id="u-resptype" /></div>
+            <div><label>PKCE</label>
+              <select id="u-pkce">
+                <option value="true">Enabled</option>
+                <option value="false">Disabled</option>
+              </select>
+            </div>
+          </div>
+          <label>Additional Params (JSON)</label>
+          <textarea id="u-extra"></textarea>
+          <label>
+            <input type="checkbox" id="u-enabled" style="width:auto;margin-bottom:0" />
+            &nbsp;Enabled
+          </label>
+        </div>
+        <button class="success" onclick="updateProvider()">💾 Save Changes</button>
+      </div>
+      <div id="update-resp" class="response-box" style="display:none"></div>
+    </div>
+
+    <!-- DELETE / TOGGLE -->
+    <div id="panel-delete" class="panel">
+      <h2>🗑️ Delete / Toggle Provider</h2>
+      <div class="card">
+        <h3>Toggle Enabled State</h3>
+        <label>Provider ID</label>
+        <input id="t-id" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" />
+        <button onclick="toggleProvider()">🔄 Toggle</button>
+        <div id="toggle-resp" class="response-box" style="display:none"></div>
+      </div>
+      <div class="card">
+        <h3>Delete Provider</h3>
+        <label>Provider ID</label>
+        <input id="d-id" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" />
+        <button class="danger" onclick="deleteProvider()">🗑️ Delete</button>
+        <div id="delete-resp" class="response-box" style="display:none"></div>
+      </div>
+    </div>
+
+    <!-- LOGIN -->
+    <div id="panel-login" class="panel">
+      <h2>🔑 Login via SSO</h2>
+      <div class="card">
+        <h3>Available Providers</h3>
+        <p style="font-size:.8rem;color:#64748b;margin-bottom:.75rem">
+          Click a provider to initiate the OAuth flow. The API handles PKCE + state automatically.
+        </p>
+        <button onclick="loadLoginProviders()">🔄 Refresh Providers</button>
+        <div id="login-buttons" class="login-buttons"></div>
+      </div>
+      <div class="card">
+        <h3>Manual Login</h3>
+        <label>Provider Slug</label>
+        <input id="login-slug" placeholder="google" />
+        <label>Frontend Callback URI (where to return with token)</label>
+        <input id="login-fe" value="http://localhost:5500/test.html" />
+        <button onclick="initiateLogin()">🚀 Initiate Login</button>
+        <div id="auth-url-display" style="display:none">
+          <label style="margin-top:.75rem">Authorization URL (open in browser):</label>
+          <div class="token-display" id="auth-url-text"></div>
+          <button class="success" onclick="openAuthUrl()">🌐 Open in Browser</button>
+        </div>
+      </div>
+      <div id="login-resp" class="response-box" style="display:none"></div>
+
+      <!-- Token from callback -->
+      <div id="token-section" class="card" style="display:none">
+        <h3>✅ Logged In!</h3>
+        <label>JWT Token</label>
+        <div class="token-display" id="token-display"></div>
+        <button onclick="copyToken()">📋 Copy Token</button>
+        <button class="secondary" onclick="decodeToken()">🔍 Decode</button>
+        <div id="decoded-token" class="response-box" style="display:none"></div>
+      </div>
+    </div>
+
+    <!-- ME -->
+    <div id="panel-me" class="panel">
+      <h2>👤 Verify JWT Token</h2>
+      <div class="card">
+        <label>JWT Token</label>
+        <textarea id="me-token" placeholder="Paste your JWT token here..." style="min-height:100px"></textarea>
+        <button onclick="callMe()">🔍 Verify & Get Claims</button>
+        <div id="me-resp" class="response-box" style="display:none"></div>
+      </div>
+    </div>
+
+  </main>
+</div>
+
+<script>
+  // ── State ────────────────────────────────────────────────────
+  let API_BASE  = localStorage.getItem('sso_api_base')  || 'http://localhost:5000';
+  let JWT_TOKEN = localStorage.getItem('sso_jwt_token') || '';
+  let currentAuthUrl = '';
+
+  document.getElementById('apiBase').value  = API_BASE;
+  document.getElementById('jwtToken').value = JWT_TOKEN;
+
+  // Check for token in URL (returned from callback)
+  const urlParams = new URLSearchParams(window.location.search);
+  const urlToken  = urlParams.get('token');
+  if (urlToken) {
+    JWT_TOKEN = urlToken;
+    localStorage.setItem('sso_jwt_token', JWT_TOKEN);
+    document.getElementById('jwtToken').value = JWT_TOKEN;
+    document.getElementById('token-section').style.display = 'block';
+    document.getElementById('token-display').textContent = JWT_TOKEN;
+    show('panel-login');
+    window.history.replaceState({}, '', window.location.pathname);
+  }
+
+  // ── Navigation ───────────────────────────────────────────────
+  function show(panelId) {
+    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+    document.querySelectorAll('nav a').forEach(a => a.classList.remove('active'));
+    document.getElementById(panelId).classList.add('active');
+    event?.currentTarget?.classList.add('active');
+  }
+
+  function saveConfig() {
+    API_BASE  = document.getElementById('apiBase').value.trim().replace(/\/$/, '');
+    JWT_TOKEN = document.getElementById('jwtToken').value.trim();
+    localStorage.setItem('sso_api_base',  API_BASE);
+    localStorage.setItem('sso_jwt_token', JWT_TOKEN);
+    showResp('config-resp', { message: 'Saved!', apiBase: API_BASE }, false);
+  }
+
+  // ── API Helpers ──────────────────────────────────────────────
+  function headers(includeAuth = false) {
+    const h = { 'Content-Type': 'application/json' };
+    if (includeAuth && JWT_TOKEN) h['Authorization'] = `Bearer ${JWT_TOKEN}`;
+    return h;
+  }
+
+  async function apiFetch(path, options = {}) {
+    const url = API_BASE + path;
+    try {
+      const resp = await fetch(url, options);
+      const text = await resp.text();
+      let body;
+      try { body = JSON.parse(text); } catch { body = text; }
+      return { ok: resp.ok, status: resp.status, body };
+    } catch (e) {
+      return { ok: false, status: 0, body: { error: e.message } };
+    }
+  }
+
+  function showResp(id, data, isError = false) {
+    const el = document.getElementById(id);
+    el.style.display = 'block';
+    el.className = 'response-box' + (isError ? ' error' : '');
+    el.textContent = typeof data === 'string'
+      ? data
+      : JSON.stringify(data, null, 2);
+  }
+
+  // ── Connection Test ──────────────────────────────────────────
+  async function testConnection() {
+    saveConfig();
+    const r = await apiFetch('/api/sso-providers/public');
+    showResp('config-resp', r.ok
+      ? { status: '🟢 Connected', providers: r.body }
+      : { status: '🔴 Failed', ...r.body }, !r.ok);
+  }
+
+  // ── List Providers ───────────────────────────────────────────
+  async function loadProviders(publicOnly) {
+    const r = await apiFetch(publicOnly ? '/api/sso-providers/public' : '/api/sso-providers');
+    showResp('list-resp', r.body, !r.ok);
+
+    if (r.ok && Array.isArray(r.body)) {
+      const grid = document.getElementById('providers-grid');
+      grid.innerHTML = r.body.map(p => `
+        <div class="provider-card">
+          <h4>${p.name}</h4>
+          <div class="slug">${p.slug}</div>
+          <span class="badge type">${p.providerType ?? p.ProviderType}</span>
+          <span class="badge ${(p.isEnabled ?? p.IsEnabled) ? 'enabled' : 'disabled'}">
+            ${(p.isEnabled ?? p.IsEnabled) ? '● Enabled' : '○ Disabled'}
+          </span>
+          <div style="margin-top:.75rem;display:flex;gap:.4rem">
+            <button onclick="fillUpdateId('${p.id ?? p.Id}')" style="font-size:.75rem;padding:.3rem .6rem">Edit</button>
+            <button class="danger" onclick="quickDelete('${p.id ?? p.Id}')" style="font-size:.75rem;padding:.3rem .6rem">Del</button>
+            <button class="secondary" onclick="quickToggle('${p.id ?? p.Id}')" style="font-size:.75rem;padding:.3rem .6rem">Toggle</button>
+          </div>
+        </div>`).join('');
+    }
+  }
+
+  function fillUpdateId(id) {
+    document.getElementById('u-id').value = id;
+    show('panel-update');
+    loadForEdit();
+  }
+
+  // ── Create Provider ──────────────────────────────────────────
+  async function createProvider() {
+    const payload = buildPayload('c-');
+    const r = await apiFetch('/api/sso-providers', {
+      method: 'POST',
+      headers: headers(),
+      body: JSON.stringify(payload)
+    });
+    showResp('create-resp', r.body, !r.ok);
+  }
+
+  function buildPayload(prefix) {
+    return {
+      name:                 v(prefix + 'name'),
+      slug:                 v(prefix + 'slug'),
+      providerType:         v(prefix + 'type'),
+      clientId:             v(prefix + 'clientid'),
+      clientSecret:         v(prefix + 'secret'),
+      authority:            v(prefix + 'authority') || null,
+      authorizationEndpoint: v(prefix + 'authep') || null,
+      tokenEndpoint:        v(prefix + 'tokenep') || null,
+      userInfoEndpoint:     v(prefix + 'userinfep') || null,
+      jwksUri:              v(prefix + 'jwks') || null,
+      grantType:            v(prefix + 'grant'),
+      scopes:               v(prefix + 'scopes'),
+      responseType:         v(prefix + 'resptype'),
+      pkceEnabled:          v(prefix + 'pkce') === 'true',
+      additionalParameters: v(prefix + 'extra') || null,
+      isEnabled:            document.getElementById(prefix + 'enabled').checked
+    };
+  }
+
+  function v(id) { return (document.getElementById(id)?.value || '').trim(); }
+
+  function prefillGoogle() {
+    setv('c-name', 'Google'); setv('c-slug', 'google');
+    setv('c-type', 'oidc'); setv('c-grant', 'authorization_code');
+    setv('c-authority', 'https://accounts.google.com');
+    setv('c-scopes', 'openid profile email');
+    setv('c-extra', '{"prompt":"select_account"}');
+    setv('c-pkce', 'true');
+  }
+
+  function prefillAzure() {
+    setv('c-name', 'Azure AD'); setv('c-slug', 'azure-ad');
+    setv('c-type', 'oidc'); setv('c-grant', 'authorization_code');
+    setv('c-authority', 'https://login.microsoftonline.com/{tenant-id}/v2.0');
+    setv('c-scopes', 'openid profile email offline_access');
+    setv('c-extra', '');
+  }
+
+  function setv(id, val) {
+    const el = document.getElementById(id);
+    if (el) el.value = val;
+  }
+
+  // ── Update Provider ──────────────────────────────────────────
+  async function loadForEdit() {
+    const id = v('u-id');
+    if (!id) return;
+    const r = await apiFetch(`/api/sso-providers/${id}`);
+    if (!r.ok) { showResp('update-resp', r.body, true); return; }
+    const p = r.body;
+    document.getElementById('update-form').style.display = 'block';
+    setv('u-name', p.name); setv('u-slug', p.slug);
+    setv('u-type', p.providerType); setv('u-grant', p.grantType);
+    setv('u-clientid', p.clientId); setv('u-secret', '');
+    setv('u-authority', p.authority || '');
+    setv('u-authep', p.authorizationEndpoint || '');
+    setv('u-tokenep', p.tokenEndpoint || '');
+    setv('u-userinfep', p.userInfoEndpoint || '');
+    setv('u-jwks', p.jwksUri || '');
+    setv('u-scopes', p.scopes); setv('u-resptype', p.responseType);
+    setv('u-pkce', String(p.pkceEnabled));
+    setv('u-extra', p.additionalParameters || '');
+    document.getElementById('u-enabled').checked = p.isEnabled;
+    showResp('update-resp', { loaded: p.name }, false);
+  }
+
+  async function updateProvider() {
+    const id = v('u-id');
+    const payload = buildPayload('u-');
+    // Secret might be blank (no change) — you may want server-side logic for this
+    const r = await apiFetch(`/api/sso-providers/${id}`, {
+      method: 'PUT',
+      headers: headers(),
+      body: JSON.stringify(payload)
+    });
+    showResp('update-resp', r.body, !r.ok);
+  }
+
+  // ── Delete / Toggle ──────────────────────────────────────────
+  async function deleteProvider() {
+    if (!confirm('Delete this provider?')) return;
+    const id = v('d-id');
+    const r = await apiFetch(`/api/sso-providers/${id}`, { method: 'DELETE' });
+    showResp('delete-resp', r.ok ? { message: 'Deleted.' } : r.body, !r.ok);
+  }
+
+  async function toggleProvider() {
+    const id = v('t-id');
+    const r = await apiFetch(`/api/sso-providers/${id}/toggle`, { method: 'PATCH' });
+    showResp('toggle-resp', r.body, !r.ok);
+  }
+
+  async function quickDelete(id) {
+    if (!confirm(`Delete ${id}?`)) return;
+    const r = await apiFetch(`/api/sso-providers/${id}`, { method: 'DELETE' });
+    if (r.ok) loadProviders(false);
+  }
+
+  async function quickToggle(id) {
+    await apiFetch(`/api/sso-providers/${id}/toggle`, { method: 'PATCH' });
+    loadProviders(false);
+  }
+
+  // ── Login ─────────────────────────────────────────────────────
+  async function loadLoginProviders() {
+    const r = await apiFetch('/api/sso-providers/public');
+    if (!r.ok) { showResp('login-resp', r.body, true); return; }
+
+    const container = document.getElementById('login-buttons');
+    container.innerHTML = r.body.map(p => `
+      <button class="login-btn" onclick="loginWith('${p.slug ?? p.Slug}')">
+        🔑 ${p.name ?? p.Name}
+      </button>`).join('');
+  }
+
+  function loginWith(slug) {
+    document.getElementById('login-slug').value = slug;
+    initiateLogin();
+  }
+
+  async function initiateLogin() {
+    const slug = v('login-slug');
+    const fe   = v('login-fe');
+    if (!slug) return;
+
+    const r = await apiFetch(
+      `/api/auth/login/${slug}?frontendCallbackUri=${encodeURIComponent(fe)}`,
+      { headers: { 'Accept': 'application/json' } }
+    );
+
+    if (r.ok && r.body.authorizationUrl) {
+      currentAuthUrl = r.body.authorizationUrl;
+      document.getElementById('auth-url-text').textContent = currentAuthUrl;
+      document.getElementById('auth-url-display').style.display = 'block';
+    }
+    showResp('login-resp', r.body, !r.ok);
+  }
+
+  function openAuthUrl() {
+    if (currentAuthUrl) window.location.href = currentAuthUrl;
+  }
+
+  // ── Token ─────────────────────────────────────────────────────
+  function copyToken() {
+    navigator.clipboard.writeText(JWT_TOKEN);
+    document.getElementById('token-display').textContent = '✅ Copied!';
+    setTimeout(() => document.getElementById('token-display').textContent = JWT_TOKEN, 1500);
+  }
+
+  function decodeToken() {
+    try {
+      const parts  = JWT_TOKEN.split('.');
+      const header  = JSON.parse(atob(parts[0]));
+      const payload = JSON.parse(atob(parts[1].replace(/-/g,'+').replace(/_/g,'/')));
+      showResp('decoded-token', { header, payload }, false);
+      document.getElementById('decoded-token').style.display = 'block';
+    } catch { showResp('decoded-token', { error: 'Invalid token' }, true); }
+  }
+
+  // ── Verify ────────────────────────────────────────────────────
+  async function callMe() {
+    const token = v('me-token') || JWT_TOKEN;
+    const r = await apiFetch('/api/auth/me', {
+      headers: { 'Authorization': `Bearer ${token}` }
+    });
+    showResp('me-resp', r.body, !r.ok);
+  }
+
+  // ── API Reference Table ───────────────────────────────────────
+  const routes = [
+    ['GET',    '/api/sso-providers',              'List all providers'],
+    ['GET',    '/api/sso-providers/public',        'List enabled (no secrets)'],
+    ['GET',    '/api/sso-providers/{id}',          'Get by ID'],
+    ['POST',   '/api/sso-providers',              'Create provider'],
+    ['PUT',    '/api/sso-providers/{id}',          'Update provider'],
+    ['DELETE', '/api/sso-providers/{id}',          'Delete provider'],
+    ['PATCH',  '/api/sso-providers/{id}/toggle',   'Toggle enabled'],
+    ['GET',    '/api/auth/login/{slug}',           'Initiate OAuth login'],
+    ['GET',    '/api/auth/callback/{slug}',        'OAuth callback (set by provider)'],
+    ['GET',    '/api/auth/me',                     'Get current user claims'],
+  ];
+
+  const colors = { GET:'#22c55e', POST:'#f59e0b', PUT:'#3b82f6', DELETE:'#ef4444', PATCH:'#8b5cf6' };
+  document.getElementById('api-ref').innerHTML = routes.map(([m, p, d]) =>
+    `<tr>
+       <td style="padding:.4rem"><span style="color:${colors[m]};font-weight:700;font-size:.75rem;font-family:monospace">${m}</span></td>
+       <td style="padding:.4rem;font-family:monospace;font-size:.75rem;color:#94a3b8">${p}</td>
+       <td style="padding:.4rem;font-size:.8rem;color:#cbd5e1">${d}</td>
+     </tr>`).join('');
+</script>
+</body>
+</html>
+
+Migrations & Run
+
+bash
+# Create initial migration
+dotnet ef migrations add InitialCreate
+
+# Apply to PostgreSQL
+dotnet ef database update
+
+# Run the API
+dotnet run
+
+API Endpoint Summary
+Method	Route	Purpose
+GET	/api/sso-providers	All providers (admin)
+GET	/api/sso-providers/public	Enabled only, no secrets
+POST	/api/sso-providers	Create new provider
+PUT	/api/sso-providers/{id}	Update provider config
+DELETE	/api/sso-providers/{id}	Delete provider
+PATCH	/api/sso-providers/{id}/toggle	Enable/disable
+GET	/api/auth/login/{slug}	Start OAuth flow
+GET	/api/auth/callback/{slug}	OAuth callback
+GET	/api/auth/me	Validate JWT + get claims
+Key Design Decisions
+
+    Dynamic loading uses IMemoryCache with a 10-minute TTL — no app restart needed to add/edit providers
+
+    OIDC Discovery auto-resolves endpoints from /.well-known/openid-configuration so you only need the Authority URL for standard providers like Google or Azure AD​
+
+    PKCE (S256 method) is enabled by default for security; state and code verifier are stored in short-lived HttpOnly cookies during the redirect flow
+
+    Upsert logic links one user to multiple SSO providers via UserSsoLogin, so the same person can sign in via Google or Azure and land on the same account​
+
+    ClientSecret is stored as-is — for production, encrypt it using ASP.NET Core Data Protection before persisting to PostgreSQL
+
+
