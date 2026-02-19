@@ -1,0 +1,206 @@
+Here are realistic test data examples for adding SSO providers to your API, covering the most common authentication providers:
+1. Azure AD (Microsoft Entra ID) - OAuth2
+HTTP Request
+
+text
+POST /api/ssoproviders
+Content-Type: application/json
+Authorization: Bearer YOUR_ADMIN_JWT_TOKEN
+
+{
+  "providerName": "AzureAD",
+  "providerType": "OAuth2",
+  "clientId": "a1b2c3d4-5678-90ab-cdef-1234567890ab",
+  "clientSecret": "FyX7Q~DuPJ3kLmN8pQrStUvWxYz.AbCdEfGhIjKl",
+  "authority": "https://login.microsoftonline.com/contoso.onmicrosoft.com",
+  "grantType": "authorization_code",
+  "scope": "openid profile email User.Read",
+  "redirectUri": "https://yourapp.com/api/authentication/callback",
+  "metadataUrl": "https://login.microsoftonline.com/contoso.onmicrosoft.com/v2.0/.well-known/openid-configuration",
+  "isActive": true,
+  "additionalSettings": {
+    "tenant": "contoso.onmicrosoft.com",
+    "responseType": "code",
+    "responseMode": "query"
+  }
+}
+
+cURL Command
+
+bash
+curl -X POST https://localhost:5001/api/ssoproviders \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_ADMIN_JWT_TOKEN" \
+  -d '{
+    "providerName": "AzureAD",
+    "providerType": "OAuth2",
+    "clientId": "a1b2c3d4-5678-90ab-cdef-1234567890ab",
+    "clientSecret": "FyX7Q~DuPJ3kLmN8pQrStUvWxYz.AbCdEfGhIjKl",
+    "authority": "https://login.microsoftonline.com/contoso.onmicrosoft.com",
+    "grantType": "authorization_code",
+    "scope": "openid profile email User.Read",
+    "redirectUri": "https://yourapp.com/api/authentication/callback",
+    "isActive": true
+  }'
+
+2. Google OAuth - OpenID Connect
+HTTP Request
+
+text
+POST /api/ssoproviders
+Content-Type: application/json
+Authorization: Bearer YOUR_ADMIN_JWT_TOKEN
+
+{
+  "providerName": "Google",
+  "providerType": "OpenIdConnect",
+  "clientId": "123456789012-abc3defg4hijklmno5pqrstu6vwxyz78.apps.googleusercontent.com",
+  "clientSecret": "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t",
+  "authority": "https://accounts.google.com",
+  "grantType": "authorization_code",
+  "scope": "openid profile email",
+  "redirectUri": "https://yourapp.com/api/authentication/callback",
+  "metadataUrl": "https://accounts.google.com/.well-known/openid-configuration",
+  "isActive": true,
+  "additionalSettings": {
+    "accessType": "offline",
+    "prompt": "consent",
+    "includeGrantedScopes": "true"
+  }
+}
+
+3. Okta - OpenID Connect​
+HTTP Request
+
+text
+POST /api/ssoproviders
+Content-Type: application/json
+Authorization: Bearer YOUR_ADMIN_JWT_TOKEN
+
+{
+  "providerName": "Okta",
+  "providerType": "OpenIdConnect",
+  "clientId": "0oa2b3c4d5e6f7g8h9i0",
+  "clientSecret": "Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9St0Uv1Wx2Yz3",
+  "authority": "https://dev-123456.okta.com/oauth2/default",
+  "grantType": "authorization_code",
+  "scope": "openid email profile groups",
+  "redirectUri": "https://yourapp.com/api/authentication/callback",
+  "metadataUrl": "https://dev-123456.okta.com/oauth2/default/.well-known/openid-configuration",
+  "isActive": true,
+  "additionalSettings": {
+    "responseType": "code",
+    "jwsAlgorithm": "RS256",
+    "useNonce": "true",
+    "disablePKCE": "false",
+    "clientAuthMethod": "client_secret_basic"
+  }
+}
+
+4. GitHub OAuth
+HTTP Request
+
+text
+POST /api/ssoproviders
+Content-Type: application/json
+Authorization: Bearer YOUR_ADMIN_JWT_TOKEN
+
+{
+  "providerName": "GitHub",
+  "providerType": "OAuth2",
+  "clientId": "Iv1.a1b2c3d4e5f6g7h8",
+  "clientSecret": "1a2b3c4d5e6f7g8h9i0j1k2l3m4n5o6p7q8r9s0t",
+  "authority": "https://github.com/login/oauth/authorize",
+  "grantType": "authorization_code",
+  "scope": "read:user user:email",
+  "redirectUri": "https://yourapp.com/api/authentication/callback",
+  "isActive": true,
+  "additionalSettings": {
+    "tokenEndpoint": "https://github.com/login/oauth/access_token",
+    "userEndpoint": "https://api.github.com/user",
+    "allowSignup": "true"
+  }
+}
+
+5. Auth0
+HTTP Request
+
+text
+POST /api/ssoproviders
+Content-Type: application/json
+Authorization: Bearer YOUR_ADMIN_JWT_TOKEN
+
+{
+  "providerName": "Auth0",
+  "providerType": "OpenIdConnect",
+  "clientId": "AbCdEfGhIjKlMnOpQrStUvWxYz123456",
+  "clientSecret": "Ab1_Cd2-Ef3_Gh4-Ij5_Kl6-Mn7_Op8-Qr9_St0-Uv1_Wx2",
+  "authority": "https://yourcompany.us.auth0.com",
+  "grantType": "authorization_code",
+  "scope": "openid profile email",
+  "redirectUri": "https://yourapp.com/api/authentication/callback",
+  "metadataUrl": "https://yourcompany.us.auth0.com/.well-known/openid-configuration",
+  "isActive": true,
+  "additionalSettings": {
+    "audience": "https://yourcompany.com/api",
+    "connection": "Username-Password-Authentication"
+  }
+}
+
+6. Azure B2C​
+HTTP Request
+
+text
+POST /api/ssoproviders
+Content-Type: application/json
+Authorization: Bearer YOUR_ADMIN_JWT_TOKEN
+
+{
+  "providerName": "AzureB2C",
+  "providerType": "OAuth2",
+  "clientId": "11112222-bbbb-3333-cccc-4444dddd5555",
+  "clientSecret": "FyX7Q~DuPJ3kLmN8pQrStUvWxYz.AbCdEfGhIjKl",
+  "authority": "https://yourcompany.b2clogin.com/yourcompany.onmicrosoft.com/B2C_1A_SIGNUP_SIGNIN",
+  "grantType": "authorization_code",
+  "scope": "https://yourcompany.onmicrosoft.com/api/.default offline_access",
+  "redirectUri": "https://yourapp.com/api/authentication/callback",
+  "metadataUrl": "https://yourcompany.b2clogin.com/yourcompany.onmicrosoft.com/B2C_1A_SIGNUP_SIGNIN/v2.0/.well-known/openid-configuration",
+  "isActive": true,
+  "additionalSettings": {
+    "tenant": "yourcompany.onmicrosoft.com",
+    "policy": "B2C_1A_SIGNUP_SIGNIN",
+    "responseType": "code"
+  }
+}
+
+Testing with Postman Collection
+Get All Providers
+
+text
+GET /api/ssoproviders?activeOnly=true
+Authorization: Bearer YOUR_ADMIN_JWT_TOKEN
+
+Get Single Provider
+
+text
+GET /api/ssoproviders/a1b2c3d4-5678-90ab-cdef-1234567890ab
+Authorization: Bearer YOUR_ADMIN_JWT_TOKEN
+
+Update Provider
+
+text
+PUT /api/ssoproviders/a1b2c3d4-5678-90ab-cdef-1234567890ab
+Content-Type: application/json
+Authorization: Bearer YOUR_ADMIN_JWT_TOKEN
+
+{
+  "providerName": "AzureAD",
+  "providerType": "OAuth2",
+  "clientId": "a1b2c3d4-5678-90ab-cdef-1234567890ab",
+  "clientSecret": "NEW_SECRET_FyX7Q~NewSecret123456",
+  "authority": "https://login.microsoftonline.com/contoso.onmicrosoft.com",
+  "grantType": "authorization_code",
+  "scope": "openid profile email User.Read",
+  "redirectUri": "https://yourapp.com/api/authentication/callback",
+  "isActive": true
+}
