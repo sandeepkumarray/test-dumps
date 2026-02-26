@@ -1,0 +1,386 @@
+Low-Latency .NET + Kafka Streaming Architecture
+
+This document describes the architecture of a low-latency streaming application built on ASP.NET Core (.NET), Kafka, and WebSockets, using in-process concurrency primitives and queues for efficient processing and backpressure.
+1. High-Level Overview
+
+The system enables near real-time bidirectional communication between clients and the backend, and between the backend and Kafka:
+
+    Clients connect over WebSockets for low-latency updates and can also use REST for control/health operations.
+
+    The backend uses an internal queueing and worker pipeline to process messages with controlled concurrency.
+
+    Kafka acts as the main event bus and durable buffer for the wider system.
+
+    Optional state store is used for caching, read models, or persisting derived state.
+
+    Observability is integrated across all critical components.
+
+2. Main Components
+2.1 Clients
+
+    Web Client (browser)
+
+        Connects via WebSocket to receive/submit real-time updates.
+
+        Can call REST endpoints for configuration, snapshots, or health.
+
+    Mobile Client
+
+        Same integration pattern as web client (WebSocket + REST).
+
+These clients are logically grouped under the Clients boundary.
+2.2 ASP.NET Core Host (.NET)
+
+The ASP.NET Core Host is the main application process. It exposes endpoints, manages WebSocket connections, and runs background workers.
+2.2.1 WebSocket Endpoint
+
+    Handles WebSocket upgrade requests and maintains long-lived connections.
+
+    Supports:
+
+        Incoming messages from clients (commands, actions, subscriptions).
+
+        Outgoing messages to clients (events, updates, notifications).
+
+    Exposes a minimal, binary- or JSON-based protocol for efficiency.
+
+    Integrates with the internal message router to route client messages into the processing pipeline.
+
+2.2.2 REST / Health Endpoint
+
+    Provides:
+
+        Liveness and readiness probes for orchestration (Kubernetes, etc.).
+
+        Optional HTTP endpoints for:
+
+            Admin commands (e.g., pause/ resume consumption).
+
+            Snapshot reads or configuration.
+
+    Stateless by design; heavy reads should go through the state store or a read-model service.
+
+2.2.3 Message Router
+
+    Sits between the WebSocket endpoint and the internal queue.
+
+    Responsibilities:
+
+        Parse incoming messages (e.g., JSON).
+
+        Perform basic validation and routing decisions.
+
+        Map message types to specific internal workflows or Kafka topics.
+
+    Ensures client-level concerns are separated from business processing and Kafka integration.
+
+2.2.4 Bounded In-Memory Queue
+
+    Implemented as a bounded in-process queue (e.g., System.Threading.Channels or a similar construct).
+
+    Primary responsibilities:
+
+        Buffer messages between I/O (WebSockets / Kafka consumer) and CPU-bound work (workers).
+
+        Provide backpressure: once capacity is reached, producers either wait, drop, or reject items according to policy.
+
+    Benefits:
+
+        Stabilizes latency and memory usage under load.
+
+        Decouples message ingestion rate from processing rate.
+
+    Typical policies:
+
+        For critical commands: block producers or signal “server busy”.
+
+        For non-critical updates: drop or coalesce.
+
+2.2.5 Background Worker(s)
+
+    Implemented as hosted services (IHostedService / BackgroundService).
+
+    Responsibilities:
+
+        Continuously dequeue messages from the bounded queue.
+
+        Dispatch work into the worker pool.
+
+        Manage lifecycle, cancellation, and graceful shutdown.
+
+    Can run multiple instances per process to increase throughput.
+
+2.2.6 Worker Pool
+
+    Represents the concurrent processing layer (e.g., tasks with async/await).
+
+    Responsibilities:
+
+        Execute business logic:
+
+            Apply domain rules.
+
+            Enrich messages.
+
+            Perform validations or transformations.
+
+        Interact with:
+
+            Serializer/Deserializer (for payload encoding).
+
+            Kafka producer (for publishing).
+
+            State store (for reads/writes).
+
+            WebSocket endpoint (to push results to clients).
+
+    Concurrency control:
+
+        Maximum parallelism can be governed (e.g., using semaphores or scheduling) to avoid overloading CPU or downstream dependencies.
+
+2.2.7 Serializer/Deserializer
+
+    Encapsulates all serialization concerns:
+
+        JSON for client-facing payloads.
+
+        Avro / Protobuf / JSON for Kafka messages, depending on schema strategy.
+
+    Responsibilities:
+
+        Enforce schema compatibility and versioning.
+
+        Hide serialization library details behind a clear interface.
+
+    Enables:
+
+        Schema evolution without touching business logic.
+
+        Observability on serialization failures.
+
+2.2.8 Observability
+
+    Central place for:
+
+        Metrics (latency, throughput, queue depth, worker utilization).
+
+        Tracing (end-to-end traces across WebSockets, workers, Kafka).
+
+        Logs (structured logs for diagnosis).
+
+    Key instrumentation points:
+
+        WebSocket endpoint (connection life cycle, per-message metrics).
+
+        Queue operations (enqueue/dequeue rates, saturation).
+
+        Kafka producer/consumer (latency, errors, retries).
+
+        Worker pool (processing times, failures).
+
+    Typically integrates with:
+
+        Metrics backend (Prometheus, Azure Monitor, etc.).
+
+        Tracing system (OpenTelemetry-based).
+
+        Log aggregation (ELK, Splunk, etc.).
+
+3. Kafka Integration
+
+The Kafka boundary represents the event bus / streaming backbone.
+3.1 Kafka Topics
+
+    One or more topics for:
+
+        Commands, events, or domain-specific streams.
+
+        Partitioning strategy chosen to balance:
+
+            Parallelism (more partitions).
+
+            Ordering requirements (keying by aggregate or user).
+
+    May include separate topics for:
+
+        Client commands.
+
+        System events.
+
+        Snapshots or projections.
+
+3.2 Kafka Producer (Confluent.Kafka)
+
+    Used by the worker pool to publish events:
+
+        After processing client messages.
+
+        When emitting derived events or updates.
+
+    Configuration points:
+
+        Acknowledgement level (acks).
+
+        Retries, idempotence if required.
+
+        Batching and linger settings for throughput vs. latency.
+
+    Usually wrapped in an internal abstraction to:
+
+        Hide producer details.
+
+        Centralize configuration and error handling.
+
+3.3 Kafka Consumer (Confluent.Kafka)
+
+    Consumes messages from Kafka topics:
+
+        Feeds them into the bounded in-memory queue.
+
+    Responsibilities:
+
+        Partition assignment and rebalancing handling.
+
+        Offset management (commit strategies).
+
+        Error and retry behavior (including poison message handling).
+
+    Together with the queue, it creates a pull-based pipeline:
+
+        Polls Kafka.
+
+        Pushes messages into the bounded queue.
+
+        The queue and workers process at a controlled rate.
+
+4. State Store (Optional)
+
+    Represents a Cache / Database used by workers.
+
+    Possible uses:
+
+        Maintaining user or session state for WebSocket clients.
+
+        Read models used to answer snapshot queries.
+
+        Idempotency keys, deduplication, or offsets for external systems.
+
+    Technology choices:
+
+        Cache (Redis) for low-latency reads.
+
+        Database (PostgreSQL, SQL Server, etc.) for durable persistence.
+
+The state store should be accessed through a repository or application service layer rather than directly from transport-specific code.
+5. Data Flow Scenarios
+5.1 Client-to-Kafka (Command / Event Flow)
+
+    Client establishes WebSocket connection with the ASP.NET Core host.
+
+    Client sends a message (e.g., command).
+
+    WebSocket endpoint receives and forwards message to the Message Router.
+
+    Message Router:
+
+        Validates and categorizes the message.
+
+        Enqueues it onto the bounded in-memory queue.
+
+    Background worker(s) dequeue the message and pass it to the worker pool.
+
+    Worker pool:
+
+        Executes business logic.
+
+        Optionally reads/writes from the state store.
+
+        Uses Serializer/Deserializer to build the Kafka payload.
+
+        Sends the message via the Kafka producer to the appropriate topic.
+
+    Kafka persists and distributes the event to interested consumers (which may include this same service or other services).
+
+5.2 Kafka-to-Client (Streaming Updates)
+
+    Kafka consumer polls records from Kafka topics.
+
+    For each incoming record:
+
+        The consumer enqueues it into the bounded in-memory queue.
+
+    Background workers dequeue and pass to the worker pool.
+
+    Worker pool:
+
+        Processes or enriches the message.
+
+        Optionally updates the state store.
+
+        Pushes updates to relevant WebSocket connections (e.g., identified by session or subscription).
+
+    WebSocket endpoint sends messages to the connected clients in near real-time.
+
+5.3 REST / Health
+
+    REST endpoints are used for:
+
+        Health checks (read-only probes).
+
+        Administrative commands.
+
+        Non-real-time queries that read from the state store.
+
+    They typically bypass the internal queue when simple reads are sufficient.
+
+6. Concurrency, Backpressure, and Latency
+
+The architecture explicitly separates I/O from CPU-bound work using the bounded queue and worker pool:
+
+    Concurrency:
+
+        Achieved via multiple background workers and task-based worker pool.
+
+        Fine-grained control allows tuning for CPU cores and external service limits.
+
+    Backpressure:
+
+        The bounded queue limits the number of in-flight items.
+
+        When full, producers (WebSocket endpoint or Kafka consumer) must:
+
+            Wait, or
+
+            Reject/delay messages, depending on policy.
+
+    Latency:
+
+        WebSockets avoid HTTP request/response overhead for frequent updates.
+
+        Async pipeline and controlled concurrency reduce context switching.
+
+        Observability helps identify bottlenecks (e.g., queue saturation or slow consumers).
+
+7. Deployment and Scaling Considerations
+
+    Horizontal scaling:
+
+        Multiple instances of the ASP.NET Core host can run behind a load balancer.
+
+        Kafka partitions allow parallel consumption across instances.
+
+    Statelessness:
+
+        The host should be largely stateless; sticky client session state should be in:
+
+            The state store.
+
+            In-memory caches with appropriate strategies.
+
+    Resilience:
+
+        Graceful shutdown: workers drain the queue and commit offsets before exiting.
+
+        Retry and dead-letter strategies for Kafka messages.
+
+        Circuit breakers/timeouts around state store calls.
