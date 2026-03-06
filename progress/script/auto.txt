@@ -10,18 +10,14 @@ Write-Host "SQL Deployment Started"
 Write-Host "====================================="
 
 # ------------------------------------------------
-# Load config
+# Load connection string
 # ------------------------------------------------
 
 $config = Get-Content "$PSScriptRoot\appsettings.json" | ConvertFrom-Json
 $connectionString = $config.ConnectionStrings.DBConnection
 
-if([string]::IsNullOrWhiteSpace($connectionString)){
-    throw "Connection string missing"
-}
-
 # ------------------------------------------------
-# Open SQL Connection
+# Open SQL connection
 # ------------------------------------------------
 
 $connection = New-Object System.Data.SqlClient.SqlConnection
@@ -30,14 +26,11 @@ $connection.Open()
 
 Write-Host "Connected to SQL Server"
 
-$transaction = $connection.BeginTransaction()
-
 # ------------------------------------------------
 # Ensure DeploymentHistory table exists
 # ------------------------------------------------
 
 $cmd = $connection.CreateCommand()
-$cmd.Transaction = $transaction
 
 $cmd.CommandText = @"
 IF NOT EXISTS (SELECT * FROM sys.tables WHERE name='DeploymentHistory')
@@ -55,7 +48,7 @@ END
 $cmd.ExecuteNonQuery()
 
 # ------------------------------------------------
-# Helper Functions
+# Check history
 # ------------------------------------------------
 
 function IsExecuted($script){
@@ -63,7 +56,6 @@ function IsExecuted($script){
 $query = "SELECT COUNT(*) FROM DeploymentHistory WHERE ScriptName='$script'"
 
 $cmd = $connection.CreateCommand()
-$cmd.Transaction = $transaction
 $cmd.CommandText = $query
 
 $count = $cmd.ExecuteScalar()
@@ -71,16 +63,23 @@ $count = $cmd.ExecuteScalar()
 return ($count -gt 0)
 }
 
+# ------------------------------------------------
+# Log history
+# ------------------------------------------------
+
 function LogExecution($script,$type){
 
 $query = "INSERT INTO DeploymentHistory (ScriptName,ScriptType) VALUES ('$script','$type')"
 
 $cmd = $connection.CreateCommand()
-$cmd.Transaction = $transaction
 $cmd.CommandText = $query
 
 $cmd.ExecuteNonQuery()
 }
+
+# ------------------------------------------------
+# Execute SQL file (transaction per file)
+# ------------------------------------------------
 
 function ExecuteSqlFile($file,$type){
 
@@ -91,7 +90,12 @@ Write-Host "SKIPPED $scriptName (already executed)" -ForegroundColor Yellow
 return
 }
 
+Write-Host ""
 Write-Host "Executing $scriptName"
+
+$transaction = $connection.BeginTransaction()
+
+try{
 
 $sql = Get-Content $file -Raw
 
@@ -102,10 +106,31 @@ $cmd.CommandText = $sql
 
 $cmd.ExecuteNonQuery()
 
-LogExecution $scriptName $type
+# log execution
+$cmd = $connection.CreateCommand()
+$cmd.Transaction = $transaction
+$cmd.CommandText = "INSERT INTO DeploymentHistory (ScriptName,ScriptType) VALUES ('$scriptName','$type')"
+$cmd.ExecuteNonQuery()
+
+$transaction.Commit()
 
 Write-Host "SUCCESS $scriptName" -ForegroundColor Green
+
 }
+catch{
+
+$transaction.Rollback()
+
+Write-Host "FAILED $scriptName" -ForegroundColor Red
+Write-Host $_.Exception.Message -ForegroundColor Red
+
+throw
+}
+}
+
+# ------------------------------------------------
+# Execute folder
+# ------------------------------------------------
 
 function ExecuteFolder($folder,$type){
 
@@ -113,6 +138,7 @@ if(!(Test-Path $folder)){ return }
 
 Write-Host ""
 Write-Host "Processing $folder"
+Write-Host "----------------------------------"
 
 Get-ChildItem $folder -Filter *.sql | Sort Name | ForEach-Object {
 
@@ -120,6 +146,10 @@ ExecuteSqlFile $_.FullName $type
 
 }
 }
+
+# ------------------------------------------------
+# Execute releases
+# ------------------------------------------------
 
 function ExecuteRelease($root,$releases,$type){
 
@@ -134,6 +164,7 @@ continue
 
 Write-Host ""
 Write-Host "Running $type -> $release"
+Write-Host "----------------------------------"
 
 Get-ChildItem $path -Filter *.sql | Sort Name | ForEach-Object {
 
@@ -145,7 +176,7 @@ ExecuteSqlFile $_.FullName $type
 }
 
 # ------------------------------------------------
-# Deployment
+# Deployment order
 # ------------------------------------------------
 
 try{
@@ -165,25 +196,22 @@ if($Migration){
 ExecuteRelease "$PSScriptRoot\Migrations" $Migration "Migration"
 }
 
-$transaction.Commit()
-
 Write-Host ""
 Write-Host "====================================="
-Write-Host "Deployment SUCCESS"
+Write-Host "Deployment Completed Successfully"
 Write-Host "=====================================" -ForegroundColor Green
 
 }
 catch{
 
 Write-Host ""
-Write-Host "ERROR OCCURRED - Rolling Back" -ForegroundColor Red
+Write-Host "DEPLOYMENT FAILED" -ForegroundColor Red
 
-$transaction.Rollback()
-
-Write-Host $_.Exception.Message -ForegroundColor Red
 exit 1
 }
 
 finally{
+
 $connection.Close()
+
 }
