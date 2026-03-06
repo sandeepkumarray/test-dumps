@@ -1,0 +1,230 @@
+param(
+    [string[]]$Data,
+    [string[]]$Migration
+)
+
+$ErrorActionPreference = "Stop"
+
+Write-Host ""
+Write-Host "====================================="
+Write-Host "SQL Server Deployment Started"
+Write-Host "====================================="
+
+# --------------------------------------------------
+# Load appsettings.json
+# --------------------------------------------------
+
+$configPath = Join-Path $PSScriptRoot "appsettings.json"
+
+if(!(Test-Path $configPath)){
+    Write-Host "ERROR: appsettings.json not found" -ForegroundColor Red
+    exit 1
+}
+
+$config = Get-Content $configPath | ConvertFrom-Json
+$connectionString = $config.ConnectionStrings.DBConnection
+
+if([string]::IsNullOrEmpty($connectionString)){
+    Write-Host "ERROR: Connection string missing." -ForegroundColor Red
+    exit 1
+}
+
+Write-Host "Connection string loaded"
+
+# --------------------------------------------------
+# Ensure DeploymentHistory table exists
+# --------------------------------------------------
+
+$historyTableScript = @"
+IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'DeploymentHistory')
+BEGIN
+CREATE TABLE DeploymentHistory
+(
+    Id INT IDENTITY(1,1) PRIMARY KEY,
+    ScriptName NVARCHAR(500),
+    ScriptType NVARCHAR(50),
+    ExecutedOn DATETIME2 DEFAULT GETDATE()
+)
+END
+"@
+
+Invoke-Sqlcmd -ConnectionString $connectionString -Query $historyTableScript
+
+# --------------------------------------------------
+# Check if script already executed
+# --------------------------------------------------
+
+function Is-ScriptExecuted {
+
+    param(
+        [string]$scriptName
+    )
+
+    $query = "SELECT COUNT(1) FROM DeploymentHistory WHERE ScriptName='$scriptName'"
+
+    $result = Invoke-Sqlcmd -ConnectionString $connectionString -Query $query
+
+    return ($result.Column1 -gt 0)
+}
+
+# --------------------------------------------------
+# Log execution
+# --------------------------------------------------
+
+function Log-ScriptExecution {
+
+    param(
+        [string]$scriptName,
+        [string]$scriptType
+    )
+
+    $query = "
+    INSERT INTO DeploymentHistory (ScriptName, ScriptType)
+    VALUES ('$scriptName','$scriptType')
+    "
+
+    Invoke-Sqlcmd -ConnectionString $connectionString -Query $query
+}
+
+# --------------------------------------------------
+# Execute SQL file
+# --------------------------------------------------
+
+function Execute-SqlFile {
+
+    param(
+        [string]$filePath,
+        [string]$type
+    )
+
+    $scriptName = Split-Path $filePath -Leaf
+
+    if(Is-ScriptExecuted $scriptName){
+        Write-Host "SKIPPED: $scriptName already executed" -ForegroundColor Yellow
+        return
+    }
+
+    Write-Host "Executing: $scriptName"
+
+    Invoke-Sqlcmd `
+        -ConnectionString $connectionString `
+        -InputFile $filePath `
+        -QueryTimeout 0
+
+    Log-ScriptExecution $scriptName $type
+
+    Write-Host "SUCCESS: $scriptName" -ForegroundColor Green
+}
+
+# --------------------------------------------------
+# Execute folder
+# --------------------------------------------------
+
+function Execute-Folder {
+
+    param(
+        [string]$folder,
+        [string]$type
+    )
+
+    if(!(Test-Path $folder)){
+        return
+    }
+
+    Write-Host ""
+    Write-Host "Processing $folder"
+    Write-Host "--------------------------------"
+
+    $files = Get-ChildItem $folder -Filter *.sql | Sort-Object Name
+
+    foreach($file in $files){
+        Execute-SqlFile $file.FullName $type
+    }
+}
+
+# --------------------------------------------------
+# Execute Release Folder
+# --------------------------------------------------
+
+function Execute-Release {
+
+    param(
+        [string]$root,
+        [string[]]$releases,
+        [string]$type
+    )
+
+    foreach($release in $releases){
+
+        $releasePath = Join-Path $root $release
+
+        if(!(Test-Path $releasePath)){
+            Write-Host "WARNING: $release not found" -ForegroundColor Yellow
+            continue
+        }
+
+        Write-Host ""
+        Write-Host "Running $type -> $release"
+        Write-Host "--------------------------------"
+
+        $files = Get-ChildItem $releasePath -Filter *.sql | Sort-Object Name
+
+        foreach($file in $files){
+            Execute-SqlFile $file.FullName $type
+        }
+    }
+}
+
+# --------------------------------------------------
+# Begin transaction
+# --------------------------------------------------
+
+try{
+
+Invoke-Sqlcmd -ConnectionString $connectionString -Query "BEGIN TRANSACTION"
+
+Write-Host ""
+Write-Host "Executing schema components..."
+
+Execute-Folder "$PSScriptRoot\Schemas" "Schema"
+Execute-Folder "$PSScriptRoot\TableTypes" "TableType"
+Execute-Folder "$PSScriptRoot\Tables" "Table"
+Execute-Folder "$PSScriptRoot\Functions" "Function"
+Execute-Folder "$PSScriptRoot\Procedures" "Procedure"
+Execute-Folder "$PSScriptRoot\Constraints" "Constraint"
+
+# --------------------------------------------------
+# Data Releases
+# --------------------------------------------------
+
+if($Data){
+    Execute-Release "$PSScriptRoot\Data" $Data "Data"
+}
+
+# --------------------------------------------------
+# Migration Releases
+# --------------------------------------------------
+
+if($Migration){
+    Execute-Release "$PSScriptRoot\Migrations" $Migration "Migration"
+}
+
+Invoke-Sqlcmd -ConnectionString $connectionString -Query "COMMIT TRANSACTION"
+
+Write-Host ""
+Write-Host "====================================="
+Write-Host "Deployment completed successfully"
+Write-Host "=====================================" -ForegroundColor Green
+
+}
+catch{
+
+Write-Host ""
+Write-Host "ERROR OCCURRED - Rolling Back" -ForegroundColor Red
+
+Invoke-Sqlcmd -ConnectionString $connectionString -Query "ROLLBACK TRANSACTION"
+
+Write-Host $_.Exception.Message -ForegroundColor Red
+
+exit 1
+}
