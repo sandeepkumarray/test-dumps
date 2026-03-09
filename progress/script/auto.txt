@@ -1,6 +1,8 @@
 param(
     [string[]]$Data,
-    [string[]]$Migration
+    [string[]]$Migration,
+    [switch]$ReRunFunctions,
+    [switch]$ReRunProcedures
 )
 
 $ErrorActionPreference = "Stop"
@@ -10,14 +12,14 @@ Write-Host "SQL Deployment Started"
 Write-Host "====================================="
 
 # ------------------------------------------------
-# Load connection string
+# Load configuration
 # ------------------------------------------------
 
 $config = Get-Content "$PSScriptRoot\appsettings.json" | ConvertFrom-Json
 $connectionString = $config.ConnectionStrings.DBConnection
 
 # ------------------------------------------------
-# Open SQL connection
+# Open connection
 # ------------------------------------------------
 
 $connection = New-Object System.Data.SqlClient.SqlConnection
@@ -27,7 +29,7 @@ $connection.Open()
 Write-Host "Connected to SQL Server"
 
 # ------------------------------------------------
-# Ensure DeploymentHistory table exists
+# Ensure history table exists
 # ------------------------------------------------
 
 $cmd = $connection.CreateCommand()
@@ -38,25 +40,35 @@ BEGIN
 CREATE TABLE DeploymentHistory
 (
 Id INT IDENTITY PRIMARY KEY,
-ScriptName NVARCHAR(500),
+ScriptPath NVARCHAR(1000),
 ScriptType NVARCHAR(50),
 ExecutedOn DATETIME2 DEFAULT GETDATE()
 )
 END
 "@
 
-$cmd.ExecuteNonQuery()
+$null = $cmd.ExecuteNonQuery()
+
+# ------------------------------------------------
+# Convert to relative path
+# ------------------------------------------------
+
+function GetRelativePath($file){
+
+return $file.Replace($PSScriptRoot + "\", "")
+}
 
 # ------------------------------------------------
 # Check history
 # ------------------------------------------------
 
-function IsExecuted($script){
+function IsExecuted($scriptPath){
 
-$query = "SELECT COUNT(*) FROM DeploymentHistory WHERE ScriptName='$script'"
+$query = "SELECT COUNT(*) FROM DeploymentHistory WHERE ScriptPath=@path"
 
 $cmd = $connection.CreateCommand()
 $cmd.CommandText = $query
+$cmd.Parameters.Add("@path",[System.Data.SqlDbType]::NVarChar,1000).Value = $scriptPath
 
 $count = $cmd.ExecuteScalar()
 
@@ -64,34 +76,37 @@ return ($count -gt 0)
 }
 
 # ------------------------------------------------
-# Log history
+# Log execution
 # ------------------------------------------------
 
-function LogExecution($script,$type){
+function LogExecution($scriptPath,$type){
 
-$query = "INSERT INTO DeploymentHistory (ScriptName,ScriptType) VALUES ('$script','$type')"
+$query = "INSERT INTO DeploymentHistory (ScriptPath,ScriptType) VALUES (@path,@type)"
 
 $cmd = $connection.CreateCommand()
 $cmd.CommandText = $query
 
-$cmd.ExecuteNonQuery()
+$cmd.Parameters.Add("@path",[System.Data.SqlDbType]::NVarChar,1000).Value = $scriptPath
+$cmd.Parameters.Add("@type",[System.Data.SqlDbType]::NVarChar,50).Value = $type
+
+$null = $cmd.ExecuteNonQuery()
 }
 
 # ------------------------------------------------
-# Execute SQL file (transaction per file)
+# Execute SQL file
 # ------------------------------------------------
 
-function ExecuteSqlFile($file,$type){
+function ExecuteSqlFile($file,$type,$force){
 
-$scriptName = Split-Path $file -Leaf
+$relativePath = GetRelativePath $file
 
-if(IsExecuted $scriptName){
-Write-Host "SKIPPED $scriptName (already executed)" -ForegroundColor Yellow
+if(!$force -and (IsExecuted $relativePath)){
+Write-Host "SKIPPED $relativePath (already executed)" -ForegroundColor Yellow
 return
 }
 
 Write-Host ""
-Write-Host "Executing $scriptName"
+Write-Host "Executing $relativePath"
 
 $transaction = $connection.BeginTransaction()
 
@@ -104,24 +119,28 @@ $cmd.Transaction = $transaction
 $cmd.CommandTimeout = 0
 $cmd.CommandText = $sql
 
-$cmd.ExecuteNonQuery()
+$null = $cmd.ExecuteNonQuery()
 
-# log execution
+# log history
 $cmd = $connection.CreateCommand()
 $cmd.Transaction = $transaction
-$cmd.CommandText = "INSERT INTO DeploymentHistory (ScriptName,ScriptType) VALUES ('$scriptName','$type')"
-$cmd.ExecuteNonQuery()
+$cmd.CommandText = "INSERT INTO DeploymentHistory (ScriptPath,ScriptType) VALUES (@path,@type)"
+
+$cmd.Parameters.Add("@path",[System.Data.SqlDbType]::NVarChar,1000).Value = $relativePath
+$cmd.Parameters.Add("@type",[System.Data.SqlDbType]::NVarChar,50).Value = $type
+
+$null = $cmd.ExecuteNonQuery()
 
 $transaction.Commit()
 
-Write-Host "SUCCESS $scriptName" -ForegroundColor Green
+Write-Host "SUCCESS $relativePath" -ForegroundColor Green
 
 }
 catch{
 
 $transaction.Rollback()
 
-Write-Host "FAILED $scriptName" -ForegroundColor Red
+Write-Host "FAILED $relativePath" -ForegroundColor Red
 Write-Host $_.Exception.Message -ForegroundColor Red
 
 throw
@@ -132,7 +151,7 @@ throw
 # Execute folder
 # ------------------------------------------------
 
-function ExecuteFolder($folder,$type){
+function ExecuteFolder($folder,$type,$force){
 
 if(!(Test-Path $folder)){ return }
 
@@ -142,13 +161,13 @@ Write-Host "----------------------------------"
 
 Get-ChildItem $folder -Filter *.sql | Sort Name | ForEach-Object {
 
-ExecuteSqlFile $_.FullName $type
+ExecuteSqlFile $_.FullName $type $force
 
 }
 }
 
 # ------------------------------------------------
-# Execute releases
+# Execute release folder
 # ------------------------------------------------
 
 function ExecuteRelease($root,$releases,$type){
@@ -168,7 +187,7 @@ Write-Host "----------------------------------"
 
 Get-ChildItem $path -Filter *.sql | Sort Name | ForEach-Object {
 
-ExecuteSqlFile $_.FullName $type
+ExecuteSqlFile $_.FullName $type $false
 
 }
 
@@ -181,12 +200,14 @@ ExecuteSqlFile $_.FullName $type
 
 try{
 
-ExecuteFolder "$PSScriptRoot\Schemas" "Schema"
-ExecuteFolder "$PSScriptRoot\TableTypes" "TableType"
-ExecuteFolder "$PSScriptRoot\Tables" "Table"
-ExecuteFolder "$PSScriptRoot\Functions" "Function"
-ExecuteFolder "$PSScriptRoot\Procedures" "Procedure"
-ExecuteFolder "$PSScriptRoot\Constraints" "Constraint"
+ExecuteFolder "$PSScriptRoot\Schemas" "Schema" $false
+ExecuteFolder "$PSScriptRoot\TableTypes" "TableType" $false
+ExecuteFolder "$PSScriptRoot\Tables" "Table" $false
+
+ExecuteFolder "$PSScriptRoot\Functions" "Function" $ReRunFunctions
+ExecuteFolder "$PSScriptRoot\Procedures" "Procedure" $ReRunProcedures
+
+ExecuteFolder "$PSScriptRoot\Constraints" "Constraint" $false
 
 if($Data){
 ExecuteRelease "$PSScriptRoot\Data" $Data "Data"
