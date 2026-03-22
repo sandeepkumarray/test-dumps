@@ -1,0 +1,17 @@
+python project_to_text.py "D:\com.sandeep.org\com.sandeep.edu\git\.netCore\RD.Utilities.App" RD.Utilities.App --output-folder "D:\com.sandeep.org\com.sandeep.edu\git\ProjectTexts"
+python text_to_project.py RD.Utilities.App --input-folder "D:\com.sandeep.org\com.sandeep.edu\git\ProjectTexts"
+python compare_projects.py "D:\com.sandeep.org\com.sandeep.edu\git\.netCore\RD.Utilities.App" "D:\com.sandeep.org\com.sandeep.edu\git\RD.Utilities.App"
+python compare_projects_html.py "D:\com.sandeep.org\com.sandeep.edu\git\.netCore\RD.Utilities.App" "D:\com.sandeep.org\com.sandeep.edu\git\ProjectTexts\RD.Utilities.App"
+
+
+python stocks_import.py --csv "C:\Users\Sandeep\Downloads\stock_symbol.csv" --db "D:\com.sandeep.org\com.sandeep.edu\git\stocksDB.db"
+
+
+
+
+python D:\com.sandeep.org\com.sandeep.edu\git\python_scripts\project_to_text.py "D:\com.sandeep.org\com.sandeep.edu\git\.netCore\FactSetPriceDataFeed" FactSetPriceDataFeed --output-folder "D:\com.sandeep.org\com.sandeep.edu\git\ProjectTexts"
+
+python D:\com.sandeep.org\com.sandeep.edu\git\python_scripts\project_to_text.py "D:\com.sandeep.org\com.sandeep.edu\git\.netCore\FactSetPriceFeedConsumer" FactSetPriceFeedConsumer --output-folder "D:\com.sandeep.org\com.sandeep.edu\git\ProjectTexts"
+
+
+python D:\com.sandeep.org\com.sandeep.edu\git\python_scripts\create_structure.py "D:\com.sandeep.org\com.sandeep.edu\git\react\doc-analyzer\frontend" "D:\com.sandeep.org\com.sandeep.edu\git\python_scripts\structure.txt"
