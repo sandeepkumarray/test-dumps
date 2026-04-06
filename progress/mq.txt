@@ -1,0 +1,85 @@
+using IBM.WMQ;
+using System.Collections;
+
+public class MqProducer
+{
+    public void Send()
+    {
+        var props = new Hashtable
+        {
+            { MQC.HOST_NAME_PROPERTY, "localhost" },
+            { MQC.PORT_PROPERTY, 1414 },
+            { MQC.CHANNEL_PROPERTY, "DEV.APP.SVRCONN" },
+            { MQC.USER_ID_PROPERTY, "app" },
+            { MQC.PASSWORD_PROPERTY, "passw0rd" },
+            { MQC.TRANSPORT_PROPERTY, MQC.TRANSPORT_MQSERIES_CLIENT }
+        };
+
+        using var qMgr = new MQQueueManager("QM1", props);
+
+        var queue = qMgr.AccessQueue(
+            "DEV.QUEUE.1",
+            MQC.MQOO_OUTPUT + MQC.MQOO_FAIL_IF_QUIESCING);
+
+        var msg = new MQMessage();
+        msg.WriteString("Hello from .NET!");
+
+        var putOptions = new MQPutMessageOptions();
+        queue.Put(msg, putOptions);
+
+        queue.Close();
+        qMgr.Disconnect();
+    }
+}
+
+
+
+
+using IBM.WMQ;
+using System.Collections;
+
+public class Worker : BackgroundService
+{
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        var props = new Hashtable
+        {
+            { MQC.HOST_NAME_PROPERTY, "localhost" },
+            { MQC.PORT_PROPERTY, 1414 },
+            { MQC.CHANNEL_PROPERTY, "DEV.APP.SVRCONN" },
+            { MQC.USER_ID_PROPERTY, "app" },
+            { MQC.PASSWORD_PROPERTY, "passw0rd" },
+            { MQC.TRANSPORT_PROPERTY, MQC.TRANSPORT_MQSERIES_CLIENT }
+        };
+
+        using var qMgr = new MQQueueManager("QM1", props);
+
+        var queue = qMgr.AccessQueue(
+            "DEV.QUEUE.1",
+            MQC.MQOO_INPUT_AS_Q_DEF + MQC.MQOO_FAIL_IF_QUIESCING);
+
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            try
+            {
+                var msg = new MQMessage();
+                var getOptions = new MQGetMessageOptions
+                {
+                    WaitInterval = 5000,
+                    Options = MQC.MQGMO_WAIT
+                };
+
+                queue.Get(msg, getOptions);
+
+                string data = msg.ReadString(msg.MessageLength);
+                Console.WriteLine($"Received: {data}");
+            }
+            catch (MQException ex) when (ex.ReasonCode == MQC.MQRC_NO_MSG_AVAILABLE)
+            {
+                // no message
+            }
+
+            await Task.Delay(1000, stoppingToken);
+        }
+    }
+}
