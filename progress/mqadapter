@@ -1,0 +1,322 @@
+Here’s a production-grade .NET library design for IBM MQ using the modern IBMMQDotnetClient package, following best practices: DI, async patterns, resilience, extensibility, and clean architecture.
+🚀 Library: MqSharp (IBM MQ Client for .NET)
+🎯 Goals
+Clean abstraction over IBM MQ
+Producer + Consumer support
+Async-first API
+DI-friendly (Microsoft.Extensions.*)
+Retry + resiliency support
+Configurable via appsettings.json
+Background worker support
+Pluggable message serialization
+📦 NuGet Dependencies
+Bash
+dotnet add package IBMMQDotnetClient
+dotnet add package Microsoft.Extensions.DependencyInjection
+dotnet add package Microsoft.Extensions.Hosting
+dotnet add package Microsoft.Extensions.Logging
+dotnet add package Microsoft.Extensions.Options
+dotnet add package Polly
+🧱 Architecture
+
+MqSharp/
+ ├── Abstractions/
+ │    ├── IMqProducer.cs
+ │    ├── IMqConsumer.cs
+ │    ├── IMessageSerializer.cs
+ │
+ ├── Config/
+ │    ├── MqOptions.cs
+ │
+ ├── Core/
+ │    ├── MqConnectionFactory.cs
+ │    ├── MqProducer.cs
+ │    ├── MqConsumer.cs
+ │
+ ├── Serialization/
+ │    ├── JsonMessageSerializer.cs
+ │
+ ├── Hosting/
+ │    ├── MqBackgroundService.cs
+ │
+ ├── Extensions/
+ │    ├── ServiceCollectionExtensions.cs
+⚙️ Configuration
+MqOptions.cs
+C#
+public class MqOptions
+{
+    public string QueueManager { get; set; } = default!;
+    public string Channel { get; set; } = default!;
+    public string ConnectionName { get; set; } = default!;
+    public string User { get; set; } = default!;
+    public string Password { get; set; } = default!;
+    public string QueueName { get; set; } = default!;
+    public bool UseSsl { get; set; }
+}
+🔌 Connection Factory
+MqConnectionFactory.cs
+C#
+using IBM.WMQ;
+
+public class MqConnectionFactory
+{
+    private readonly MqOptions _options;
+
+    public MqConnectionFactory(IOptions<MqOptions> options)
+    {
+        _options = options.Value;
+    }
+
+    public MQQueueManager Create()
+    {
+        var props = new Hashtable
+        {
+            { MQC.HOST_NAME_PROPERTY, _options.ConnectionName.Split('(')[0] },
+            { MQC.PORT_PROPERTY, int.Parse(_options.ConnectionName.Split('(')[1].TrimEnd(')')) },
+            { MQC.CHANNEL_PROPERTY, _options.Channel },
+            { MQC.USER_ID_PROPERTY, _options.User },
+            { MQC.PASSWORD_PROPERTY, _options.Password },
+            { MQC.TRANSPORT_PROPERTY, MQC.TRANSPORT_MQSERIES_CLIENT }
+        };
+
+        return new MQQueueManager(_options.QueueManager, props);
+    }
+}
+🧾 Serializer
+IMessageSerializer.cs
+C#
+public interface IMessageSerializer
+{
+    byte[] Serialize<T>(T message);
+    T Deserialize<T>(byte[] data);
+}
+JsonMessageSerializer.cs
+C#
+using System.Text.Json;
+
+public class JsonMessageSerializer : IMessageSerializer
+{
+    public byte[] Serialize<T>(T message)
+        => JsonSerializer.SerializeToUtf8Bytes(message);
+
+    public T Deserialize<T>(byte[] data)
+        => JsonSerializer.Deserialize<T>(data)!;
+}
+📤 Producer
+IMqProducer.cs
+C#
+public interface IMqProducer
+{
+    Task SendAsync<T>(T message, CancellationToken cancellationToken = default);
+}
+MqProducer.cs
+C#
+using IBM.WMQ;
+using Polly;
+
+public class MqProducer : IMqProducer
+{
+    private readonly MqConnectionFactory _factory;
+    private readonly IMessageSerializer _serializer;
+    private readonly MqOptions _options;
+    private readonly IAsyncPolicy _retryPolicy;
+
+    public MqProducer(
+        MqConnectionFactory factory,
+        IMessageSerializer serializer,
+        IOptions<MqOptions> options)
+    {
+        _factory = factory;
+        _serializer = serializer;
+        _options = options.Value;
+
+        _retryPolicy = Policy
+            .Handle<Exception>()
+            .WaitAndRetryAsync(3, retry => TimeSpan.FromSeconds(retry));
+    }
+
+    public async Task SendAsync<T>(T message, CancellationToken cancellationToken = default)
+    {
+        await _retryPolicy.ExecuteAsync(async () =>
+        {
+            using var qm = _factory.Create();
+
+            int openOptions = MQC.MQOO_OUTPUT;
+            using var queue = qm.AccessQueue(_options.QueueName, openOptions);
+
+            var mqMessage = new MQMessage();
+            mqMessage.Write(_serializer.Serialize(message));
+
+            var pmo = new MQPutMessageOptions();
+
+            queue.Put(mqMessage, pmo);
+
+            await Task.CompletedTask;
+        });
+    }
+}
+📥 Consumer
+IMqConsumer.cs
+C#
+public interface IMqConsumer
+{
+    Task StartAsync(Func<byte[], Task> handler, CancellationToken cancellationToken);
+}
+MqConsumer.cs
+C#
+using IBM.WMQ;
+using Polly;
+
+public class MqConsumer : IMqConsumer
+{
+    private readonly MqConnectionFactory _factory;
+    private readonly MqOptions _options;
+    private readonly ILogger<MqConsumer> _logger;
+
+    public MqConsumer(
+        MqConnectionFactory factory,
+        IOptions<MqOptions> options,
+        ILogger<MqConsumer> logger)
+    {
+        _factory = factory;
+        _options = options.Value;
+        _logger = logger;
+    }
+
+    public async Task StartAsync(Func<byte[], Task> handler, CancellationToken cancellationToken)
+    {
+        using var qm = _factory.Create();
+
+        int openOptions = MQC.MQOO_INPUT_AS_Q_DEF | MQC.MQOO_FAIL_IF_QUIESCING;
+        using var queue = qm.AccessQueue(_options.QueueName, openOptions);
+
+        var gmo = new MQGetMessageOptions
+        {
+            Options = MQC.MQGMO_WAIT,
+            WaitInterval = 5000
+        };
+
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                var message = new MQMessage();
+                queue.Get(message, gmo);
+
+                var buffer = new byte[message.DataLength];
+                message.ReadFully(ref buffer);
+
+                await handler(buffer);
+            }
+            catch (MQException ex) when (ex.ReasonCode == MQC.MQRC_NO_MSG_AVAILABLE)
+            {
+                continue;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error consuming MQ message");
+                await Task.Delay(1000, cancellationToken);
+            }
+        }
+    }
+}
+🔄 Background Worker (Consumer Hosting)
+MqBackgroundService.cs
+C#
+using Microsoft.Extensions.Hosting;
+
+public class MqBackgroundService : BackgroundService
+{
+    private readonly IMqConsumer _consumer;
+    private readonly IMessageSerializer _serializer;
+
+    public MqBackgroundService(IMqConsumer consumer, IMessageSerializer serializer)
+    {
+        _consumer = consumer;
+        _serializer = serializer;
+    }
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        await _consumer.StartAsync(async (bytes) =>
+        {
+            var message = _serializer.Deserialize<string>(bytes);
+            Console.WriteLine($"Received: {message}");
+            await Task.CompletedTask;
+        }, stoppingToken);
+    }
+}
+🔌 DI Registration
+ServiceCollectionExtensions.cs
+C#
+public static class ServiceCollectionExtensions
+{
+    public static IServiceCollection AddMqSharp(
+        this IServiceCollection services,
+        IConfiguration config)
+    {
+        services.Configure<MqOptions>(config.GetSection("Mq"));
+
+        services.AddSingleton<MqConnectionFactory>();
+        services.AddSingleton<IMessageSerializer, JsonMessageSerializer>();
+
+        services.AddSingleton<IMqProducer, MqProducer>();
+        services.AddSingleton<IMqConsumer, MqConsumer>();
+
+        services.AddHostedService<MqBackgroundService>();
+
+        return services;
+    }
+}
+🧪 Usage Example
+appsettings.json
+JSON
+"Mq": {
+  "QueueManager": "QM1",
+  "Channel": "DEV.APP.SVRCONN",
+  "ConnectionName": "localhost(1414)",
+  "User": "app",
+  "Password": "pass",
+  "QueueName": "DEV.QUEUE.1"
+}
+Program.cs
+C#
+var builder = Host.CreateApplicationBuilder(args);
+
+builder.Services.AddMqSharp(builder.Configuration);
+
+var app = builder.Build();
+
+var producer = app.Services.GetRequiredService<IMqProducer>();
+
+await producer.SendAsync(new { Name = "Test", Time = DateTime.UtcNow });
+
+await app.RunAsync();
+🔥 Advanced Improvements (Recommended)
+✅ 1. Strongly Typed Consumers
+C#
+IMqConsumer<T>
+✅ 2. Message Envelope
+CorrelationId
+MessageId
+Headers
+RetryCount
+✅ 3. Dead Letter Queue (DLQ)
+Auto route failed messages
+✅ 4. Circuit Breaker (Polly)
+Protect MQ during outages
+✅ 5. Connection Pooling
+Reuse MQ connections (critical for performance)
+✅ 6. Observability
+OpenTelemetry tracing
+Metrics (Prometheus)
+✅ 7. Batch Consumption
+High throughput processing
+🧠 Design Notes (Important)
+IBM MQ client is NOT fully async, so we wrap with async pattern
+Avoid creating MQQueueManager per message in production → use pooling
+Always handle:
+MQRC_NO_MSG_AVAILABLE
+MQRC_NOT_AUTHORIZED
+MQRC_CONNECTION_BROKEN
