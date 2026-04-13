@@ -320,3 +320,254 @@ Always handle:
 MQRC_NO_MSG_AVAILABLE
 MQRC_NOT_AUTHORIZED
 MQRC_CONNECTION_BROKEN
+
+
+
+Good call — this is where the library becomes production-grade and ergonomic.
+We’ll extend your design with a strongly-typed consumer pipeline that:
+Deserializes automatically
+Supports DI per message scope
+Allows multiple handlers
+Keeps it clean & extensible (like MediatR-lite)
+🧠 Design Overview
+We introduce:
+Plain text
+IMqConsumer<T>
+IMqMessageHandler<T>
+MqConsumer<T>
+Handler Dispatcher (multi-handler support)
+Scoped execution per message
+🧾 1. Strongly Typed Consumer Contract
+IMqConsumer<T>
+C#
+public interface IMqConsumer<T>
+{
+    Task StartAsync(CancellationToken cancellationToken);
+}
+🧩 2. Message Handler Contract
+Supports multiple handlers per message type.
+IMqMessageHandler<T>
+C#
+public interface IMqMessageHandler<T>
+{
+    Task HandleAsync(T message, CancellationToken cancellationToken);
+}
+⚙️ 3. Strongly Typed Consumer Implementation
+MqConsumer<T>
+C#
+using IBM.WMQ;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+
+public class MqConsumer<T> : IMqConsumer<T>
+{
+    private readonly MqConnectionFactory _factory;
+    private readonly MqOptions _options;
+    private readonly IMessageSerializer _serializer;
+    private readonly IServiceScopeFactory _scopeFactory;
+    private readonly ILogger<MqConsumer<T>> _logger;
+
+    public MqConsumer(
+        MqConnectionFactory factory,
+        IOptions<MqOptions> options,
+        IMessageSerializer serializer,
+        IServiceScopeFactory scopeFactory,
+        ILogger<MqConsumer<T>> logger)
+    {
+        _factory = factory;
+        _options = options.Value;
+        _serializer = serializer;
+        _scopeFactory = scopeFactory;
+        _logger = logger;
+    }
+
+    public async Task StartAsync(CancellationToken cancellationToken)
+    {
+        using var qm = _factory.Create();
+
+        int openOptions = MQC.MQOO_INPUT_AS_Q_DEF | MQC.MQOO_FAIL_IF_QUIESCING;
+        using var queue = qm.AccessQueue(_options.QueueName, openOptions);
+
+        var gmo = new MQGetMessageOptions
+        {
+            Options = MQC.MQGMO_WAIT,
+            WaitInterval = 5000
+        };
+
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                var mqMessage = new MQMessage();
+                queue.Get(mqMessage, gmo);
+
+                var buffer = new byte[mqMessage.DataLength];
+                mqMessage.ReadFully(ref buffer);
+
+                var message = _serializer.Deserialize<T>(buffer);
+
+                // 🔥 Scoped handler execution
+                using var scope = _scopeFactory.CreateScope();
+
+                var handlers = scope.ServiceProvider
+                    .GetServices<IMqMessageHandler<T>>();
+
+                foreach (var handler in handlers)
+                {
+                    await handler.HandleAsync(message, cancellationToken);
+                }
+            }
+            catch (MQException ex) when (ex.ReasonCode == MQC.MQRC_NO_MSG_AVAILABLE)
+            {
+                continue;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error processing MQ message of type {Type}", typeof(T).Name);
+                await Task.Delay(1000, cancellationToken);
+            }
+        }
+    }
+}
+🧱 4. Background Service (Generic)
+MqConsumerBackgroundService<T>
+C#
+using Microsoft.Extensions.Hosting;
+
+public class MqConsumerBackgroundService<T> : BackgroundService
+{
+    private readonly IMqConsumer<T> _consumer;
+
+    public MqConsumerBackgroundService(IMqConsumer<T> consumer)
+    {
+        _consumer = consumer;
+    }
+
+    protected override Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        return _consumer.StartAsync(stoppingToken);
+    }
+}
+🔌 5. DI Registration (Generic + Clean API)
+ServiceCollectionExtensions.cs
+C#
+public static class ServiceCollectionExtensions
+{
+    public static IServiceCollection AddMqSharp(this IServiceCollection services, IConfiguration config)
+    {
+        services.Configure<MqOptions>(config.GetSection("Mq"));
+
+        services.AddSingleton<MqConnectionFactory>();
+        services.AddSingleton<IMessageSerializer, JsonMessageSerializer>();
+
+        services.AddSingleton<IMqProducer, MqProducer>();
+
+        return services;
+    }
+
+    // 🔥 Register typed consumer
+    public static IServiceCollection AddMqConsumer<T>(this IServiceCollection services)
+    {
+        services.AddSingleton<IMqConsumer<T>, MqConsumer<T>>();
+        services.AddHostedService<MqConsumerBackgroundService<T>>();
+
+        return services;
+    }
+
+    // 🔥 Register handler
+    public static IServiceCollection AddMqHandler<T, THandler>()
+        where THandler : class, IMqMessageHandler<T>
+    {
+        services.AddScoped<IMqMessageHandler<T>, THandler>();
+        return services;
+    }
+}
+🧪 6. Example Usage
+Message Model
+C#
+public class OrderCreated
+{
+    public string OrderId { get; set; } = default!;
+    public DateTime CreatedAt { get; set; }
+}
+Handler Implementation
+C#
+public class OrderCreatedHandler : IMqMessageHandler<OrderCreated>
+{
+    private readonly ILogger<OrderCreatedHandler> _logger;
+
+    public OrderCreatedHandler(ILogger<OrderCreatedHandler> logger)
+    {
+        _logger = logger;
+    }
+
+    public Task HandleAsync(OrderCreated message, CancellationToken cancellationToken)
+    {
+        _logger.LogInformation("Order received: {OrderId}", message.OrderId);
+        return Task.CompletedTask;
+    }
+}
+Program.cs
+C#
+var builder = Host.CreateApplicationBuilder(args);
+
+builder.Services.AddMqSharp(builder.Configuration);
+
+// Register strongly typed consumer
+builder.Services.AddMqConsumer<OrderCreated>();
+
+// Register handler
+builder.Services.AddMqHandler<OrderCreated, OrderCreatedHandler>();
+
+var app = builder.Build();
+
+var producer = app.Services.GetRequiredService<IMqProducer>();
+
+await producer.SendAsync(new OrderCreated
+{
+    OrderId = "ORD-123",
+    CreatedAt = DateTime.UtcNow
+});
+
+await app.RunAsync();
+🔥 Advanced Enhancements (Highly Recommended)
+✅ 1. Parallel Handler Execution
+C#
+await Task.WhenAll(handlers.Select(h => h.HandleAsync(message, ct)));
+✅ 2. Message Context (VERY IMPORTANT)
+Add metadata:
+C#
+public class MqMessageContext<T>
+{
+    public T Payload { get; set; }
+    public string MessageId { get; set; }
+    public string CorrelationId { get; set; }
+}
+✅ 3. Middleware Pipeline (Game Changer)
+Like ASP.NET pipeline:
+C#
+IMqMiddleware<T>
+Logging
+Retry
+Validation
+Dead-letter
+✅ 4. Attribute-Based Routing (Multi-Queue)
+C#
+[Queue("orders.queue")]
+public class OrderCreated { }
+✅ 5. Exactly-Once Processing
+Idempotency store (Redis/SQL)
+Deduplication using MessageId
+💥 Why This Design is Solid
+✔ Clean separation of concerns
+✔ DI + scoped handlers (no memory leaks)
+✔ Extensible like MediatR
+✔ Production-ready pattern
+✔ Works with your plugin-based architecture
+If you want next level (this will align perfectly with your plugin engine):
+👉 I can evolve this into:
+�⁠Command-based MQ execution engine
+�⁠Dynamic plugin handlers loaded from DLLs
+�⁠Multi-queue + topic routing
+�⁠Saga / workflow orchestration over MQ
+Just say 👍
