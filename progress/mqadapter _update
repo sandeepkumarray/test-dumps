@@ -1,0 +1,290 @@
+Perfect — now we evolve your library into a full messaging platform with Publish/Subscribe (Topics) using IBM MQ.
+IBM MQ supports Pub/Sub via Topics (not just queues), so we’ll extend your library cleanly without breaking existing queue-based design.
+🚀 What We’re Adding
+Plain text
+Publisher (Topic)
+Subscriber (Topic)
+Strongly-typed topic handlers
+Multi-subscriber support
+DI + Background services
+🧱 Architecture Additions
+Plain text
+Abstractions/
+ ├── IMqPublisher.cs
+ ├── IMqSubscriber<T>.cs
+ ├── IMqTopicHandler<T>.cs
+
+Core/
+ ├── MqPublisher.cs
+ ├── MqSubscriber<T>.cs
+
+Hosting/
+ ├── MqSubscriberBackgroundService<T>.cs
+📤 1. Topic Publisher
+IMqPublisher
+C#
+public interface IMqPublisher
+{
+    Task PublishAsync<T>(string topic, T message, CancellationToken cancellationToken = default);
+}
+MqPublisher
+C#
+using IBM.WMQ;
+using Polly;
+
+public class MqPublisher : IMqPublisher
+{
+    private readonly MqConnectionFactory _factory;
+    private readonly IMessageSerializer _serializer;
+
+    public MqPublisher(MqConnectionFactory factory, IMessageSerializer serializer)
+    {
+        _factory = factory;
+        _serializer = serializer;
+    }
+
+    public async Task PublishAsync<T>(string topic, T message, CancellationToken cancellationToken = default)
+    {
+        using var qm = _factory.Create();
+
+        int openOptions = MQC.MQOO_OUTPUT;
+        using var topicObj = qm.AccessTopic(topic, null, openOptions);
+
+        var mqMessage = new MQMessage();
+        mqMessage.Write(_serializer.Serialize(message));
+
+        var pmo = new MQPutMessageOptions();
+
+        topicObj.Put(mqMessage, pmo);
+
+        await Task.CompletedTask;
+    }
+}
+📥 2. Strongly Typed Subscriber
+IMqSubscriber<T>
+C#
+public interface IMqSubscriber<T>
+{
+    Task StartAsync(string topic, CancellationToken cancellationToken);
+}
+IMqTopicHandler<T>
+C#
+public interface IMqTopicHandler<T>
+{
+    Task HandleAsync(T message, CancellationToken cancellationToken);
+}
+MqSubscriber<T>
+C#
+using IBM.WMQ;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+
+public class MqSubscriber<T> : IMqSubscriber<T>
+{
+    private readonly MqConnectionFactory _factory;
+    private readonly IMessageSerializer _serializer;
+    private readonly IServiceScopeFactory _scopeFactory;
+    private readonly ILogger<MqSubscriber<T>> _logger;
+
+    public MqSubscriber(
+        MqConnectionFactory factory,
+        IMessageSerializer serializer,
+        IServiceScopeFactory scopeFactory,
+        ILogger<MqSubscriber<T>> logger)
+    {
+        _factory = factory;
+        _serializer = serializer;
+        _scopeFactory = scopeFactory;
+        _logger = logger;
+    }
+
+    public async Task StartAsync(string topic, CancellationToken cancellationToken)
+    {
+        using var qm = _factory.Create();
+
+        int openOptions = MQC.MQSO_CREATE | MQC.MQSO_NON_DURABLE;
+
+        var subDesc = new MQSubscriptionDescriptor
+        {
+            Options = openOptions,
+            ObjectString = topic
+        };
+
+        using var subscription = qm.AccessSubscription(subDesc, null, null);
+
+        using var queue = subscription.ManagedQueue;
+
+        var gmo = new MQGetMessageOptions
+        {
+            Options = MQC.MQGMO_WAIT,
+            WaitInterval = 5000
+        };
+
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                var mqMessage = new MQMessage();
+                queue.Get(mqMessage, gmo);
+
+                var buffer = new byte[mqMessage.DataLength];
+                mqMessage.ReadFully(ref buffer);
+
+                var message = _serializer.Deserialize<T>(buffer);
+
+                using var scope = _scopeFactory.CreateScope();
+
+                var handlers = scope.ServiceProvider
+                    .GetServices<IMqTopicHandler<T>>();
+
+                foreach (var handler in handlers)
+                {
+                    await handler.HandleAsync(message, cancellationToken);
+                }
+            }
+            catch (MQException ex) when (ex.ReasonCode == MQC.MQRC_NO_MSG_AVAILABLE)
+            {
+                continue;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error in topic subscriber for {Type}", typeof(T).Name);
+                await Task.Delay(1000, cancellationToken);
+            }
+        }
+    }
+}
+🔄 3. Background Service for Subscriber
+MqSubscriberBackgroundService<T>
+C#
+using Microsoft.Extensions.Hosting;
+
+public class MqSubscriberBackgroundService<T> : BackgroundService
+{
+    private readonly IMqSubscriber<T> _subscriber;
+    private readonly string _topic;
+
+    public MqSubscriberBackgroundService(IMqSubscriber<T> subscriber, string topic)
+    {
+        _subscriber = subscriber;
+        _topic = topic;
+    }
+
+    protected override Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        return _subscriber.StartAsync(_topic, stoppingToken);
+    }
+}
+🔌 4. DI Extensions
+C#
+public static class ServiceCollectionExtensions
+{
+    public static IServiceCollection AddMqPubSub(this IServiceCollection services)
+    {
+        services.AddSingleton<IMqPublisher, MqPublisher>();
+        return services;
+    }
+
+    public static IServiceCollection AddMqSubscriber<T>(this IServiceCollection services, string topic)
+    {
+        services.AddSingleton<IMqSubscriber<T>, MqSubscriber<T>>();
+
+        services.AddHostedService(provider =>
+            new MqSubscriberBackgroundService<T>(
+                provider.GetRequiredService<IMqSubscriber<T>>(),
+                topic));
+
+        return services;
+    }
+
+    public static IServiceCollection AddMqTopicHandler<T, THandler>(this IServiceCollection services)
+        where THandler : class, IMqTopicHandler<T>
+    {
+        services.AddScoped<IMqTopicHandler<T>, THandler>();
+        return services;
+    }
+}
+🧪 5. Example Usage
+Message
+C#
+public class UserCreated
+{
+    public string UserId { get; set; }
+}
+Topic Handler
+C#
+public class UserCreatedHandler : IMqTopicHandler<UserCreated>
+{
+    private readonly ILogger<UserCreatedHandler> _logger;
+
+    public UserCreatedHandler(ILogger<UserCreatedHandler> logger)
+    {
+        _logger = logger;
+    }
+
+    public Task HandleAsync(UserCreated message, CancellationToken cancellationToken)
+    {
+        _logger.LogInformation("User created: {UserId}", message.UserId);
+        return Task.CompletedTask;
+    }
+}
+Program.cs
+C#
+var builder = Host.CreateApplicationBuilder(args);
+
+builder.Services.AddMqSharp(builder.Configuration);
+builder.Services.AddMqPubSub();
+
+// Subscriber
+builder.Services.AddMqSubscriber<UserCreated>("topic://user/events");
+builder.Services.AddMqTopicHandler<UserCreated, UserCreatedHandler>();
+
+var app = builder.Build();
+
+// Publisher
+var publisher = app.Services.GetRequiredService<IMqPublisher>();
+
+await publisher.PublishAsync("topic://user/events", new UserCreated
+{
+    UserId = "U123"
+});
+
+await app.RunAsync();
+🔥 Production-Grade Enhancements (Important)
+✅ Durable Subscriptions
+C#
+MQC.MQSO_DURABLE
+Required for guaranteed delivery
+✅ Shared Subscriptions (Scaling)
+Plain text
+Multiple consumers → same topic → load balanced
+✅ Message Filtering
+C#
+subDesc.SelectionString = "color = 'blue'";
+✅ Topic Versioning Strategy
+Plain text
+topic://user/v1/events
+topic://user/v2/events
+✅ Unified Model (Queues + Topics)
+You can abstract both:
+C#
+IMqBus
+ ├── Send (Queue)
+ ├── Publish (Topic)
+💥 Final Result
+You now have:
+✔ Queue-based messaging (point-to-point)
+✔ Topic-based Pub/Sub
+✔ Strongly typed consumers + subscribers
+✔ DI + background workers
+✔ Extensible handler pipeline
+👉 Next Level (Highly Recommended)
+This is where it becomes enterprise-grade:
+🔥 Unified Message Bus (like MassTransit-lite)
+🔥 Middleware pipeline (retry, logging, DLQ)
+🔥 Schema evolution (Avro/JSON schema)
+🔥 Outbox pattern (exactly-once)
+🔥 Plugin-based dynamic handlers (fits your architecture)
+If you want, I can next:
+👉 �⁠Turn this into a MassTransit-style framework with routing + middleware pipeline + saga support
+Just say “make it enterprise bus” 🚀
