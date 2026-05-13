@@ -5,3 +5,7 @@ $h=New-Object Net.HttpListener;$h.Prefixes.Add('http://localhost:8080/');$h.Star
 
 
 $h=New-Object Net.HttpListener;$h.Prefixes.Add('http://localhost:8080/');$h.Start();$root=$PWD.Path;while($h.IsListening){$c=$h.GetContext();$r=$c.Request.Url.AbsolutePath.Trim('/');if(!$r){$r='index.html'};$p=Join-Path $root $r;if(Test-Path $p){$b=[IO.File]::ReadAllBytes($p);$c.Response.ContentLength64=$b.Length;$c.Response.OutputStream.Write($b,0,$b.Length)}else{$c.Response.StatusCode=404};$c.Response.Close()}
+
+
+
+$h=New-Object Net.HttpListener;$h.Prefixes.Add("http://localhost:8080/");$h.Start();$root=(Get-Location).Path;Add-Type -AssemblyName System.Web;while($h.IsListening){$c=$h.GetContext();$req=$c.Request.Url.LocalPath.TrimStart('/');if(!$req){$req='index.html'};$p=Join-Path $root $req;if(!(Test-Path $p)){ $p=Join-Path $root 'index.html' };$ext=[IO.Path]::GetExtension($p);$mime=[System.Web.MimeMapping]::GetMimeMapping($p);$b=[IO.File]::ReadAllBytes($p);$c.Response.ContentType=$mime;$c.Response.ContentLength64=$b.Length;$c.Response.OutputStream.Write($b,0,$b.Length);$c.Response.Close()}
