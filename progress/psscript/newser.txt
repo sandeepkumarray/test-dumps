@@ -9,3 +9,8 @@ $h=New-Object Net.HttpListener;$h.Prefixes.Add('http://localhost:8080/');$h.Star
 
 
 $h=New-Object Net.HttpListener;$h.Prefixes.Add("http://localhost:8080/");$h.Start();$root=(Get-Location).Path;Add-Type -AssemblyName System.Web;while($h.IsListening){$c=$h.GetContext();$req=$c.Request.Url.LocalPath.TrimStart('/');if(!$req){$req='index.html'};$p=Join-Path $root $req;if(!(Test-Path $p)){ $p=Join-Path $root 'index.html' };$ext=[IO.Path]::GetExtension($p);$mime=[System.Web.MimeMapping]::GetMimeMapping($p);$b=[IO.File]::ReadAllBytes($p);$c.Response.ContentType=$mime;$c.Response.ContentLength64=$b.Length;$c.Response.OutputStream.Write($b,0,$b.Length);$c.Response.Close()}
+
+
+
+
+$h=New-Object Net.HttpListener;$h.Prefixes.Add("http://localhost:8080/");$h.Start();$root=(Get-Location).Path;$m=@{'.html'='text/html';'.js'='application/javascript';'.css'='text/css';'.json'='application/json';'.png'='image/png';'.jpg'='image/jpeg';'.jpeg'='image/jpeg';'.svg'='image/svg+xml';'.ico'='image/x-icon';'.woff'='font/woff';'.woff2'='font/woff2'};while($h.IsListening){$c=$h.GetContext();$req=$c.Request.Url.LocalPath.TrimStart('/');if(!$req){$req='index.html'};$p=Join-Path $root $req;if(!(Test-Path $p)){ $p=Join-Path $root 'index.html' };$ext=[IO.Path]::GetExtension($p).ToLower();$mime=$m[$ext];if(!$mime){$mime='application/octet-stream'};$b=[IO.File]::ReadAllBytes($p);$c.Response.ContentType=$mime;$c.Response.ContentLength64=$b.Length;$c.Response.OutputStream.Write($b,0,$b.Length);$c.Response.Close()}
